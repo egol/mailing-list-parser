@@ -20,6 +20,29 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1.0.227", features = ["derive"] }
 serde_json = "1"
+# PostgreSQL database
+tokio-postgres = "0.7"
+postgres-types = "0.2"
+# Email parsing
+mailparse = "0.16.1"
+regex = "1.0"
+# Async runtime
+tokio = { version = "1", features = ["full", "macros", "rt-multi-thread"] }
+# Date/time handling
+chrono = { version = "0.4", features = ["serde"] }
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0.16"
+# Logging
+log = "0.4"
+env_logger = "0.11"
 
+[dev-dependencies]
+tokio-test = "0.4"
+
+[profile.test]
+opt-level = 1
+debug = true
+overflow-checks = true

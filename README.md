@@ -1,7 +1,8 @@
-# Tauri + React + Typescript
+# BPF Mailing List Parser
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+1. **Git Repository**: The BPF mailing list archive should be cloned at `E:/bpf/git/0.git`
+   ```bash
+   git clone --mirror https://lore.kernel.org/bpf/0 E:/bpf/git/0.git
+   ```
 
-## Recommended IDE Setup
-
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+2. **PostgreSQL Database**: Set up a PostgreSQL database and set the `DATABASE_URL` environment variable
