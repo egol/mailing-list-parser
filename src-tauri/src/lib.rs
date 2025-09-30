@@ -1,206 +1,230 @@
-use git2::{Commit, Repository};
-use serde::{Deserialize, Serialize};
-use std::env;
-use std::path::PathBuf;
+// Include the git parser module
+#[path = "git-parser.rs"]
+pub mod git_parser;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct PatchInfo {
-    pub subject: String,
-    pub author: String,
-    pub email: String,
-    pub date: String,
-    pub message_id: String,
-    pub body: String,
-    pub commit_hash: String,
-    pub files_changed: Vec<String>,
-    pub patch_type: String,
-    pub thread_info: Option<String>,
-    pub patch_content: String,
-    pub related_patches: Vec<RelatedPatch>,
+// Include the mail parser module
+#[path = "mail-parser.rs"]
+pub mod mail_parser;
+
+// Include the database module
+#[path = "database.rs"]
+pub mod database;
+
+// Import the Emitter trait for window.emit()
+use tauri::Emitter;
+
+// Re-export git parser types for easy access
+pub use git_parser::ParseError;
+// Re-export mail parser types for easy access
+pub use mail_parser::{EmailInfo, parse_email_from_content, normalize_subject};
+// Re-export database types for easy access
+pub use database::{DatabaseConfig, DatabaseSetupResult, DatabasePopulationResult, Author, Patch};
+
+// Tauri command to get BPF commit hashes (first 10 by default)
+#[tauri::command]
+fn get_bpf_commits() -> Result<Vec<String>, ParseError> {
+    git_parser::get_all_commits()
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct RelatedPatch {
-    pub subject: String,
-    pub commit_hash: String,
-    pub relation_type: String, // "parent", "child", "sibling", etc.
+// Tauri command to get BPF commit hashes with configurable limit
+#[tauri::command]
+fn get_bpf_commits_with_limit(limit: Option<usize>) -> Result<Vec<String>, ParseError> {
+    git_parser::get_all_commits_with_limit(limit)
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ParseError {
-    pub message: String,
-}
-
-impl From<git2::Error> for ParseError {
-    fn from(error: git2::Error) -> Self {
-        ParseError {
-            message: format!("Git error: {}", error),
+// Tauri command to get a specific BPF email by commit hash
+#[tauri::command]
+fn get_bpf_email(commit_hash: &str) -> Result<EmailInfo, String> {
+    match git_parser::get_email_content(commit_hash) {
+        Ok(email_content) => {
+            match mail_parser::parse_email_from_content(commit_hash, &email_content) {
+                Ok(email_info) => Ok(email_info),
+                Err(e) => Err(format!("Failed to parse email: {}", e)),
+            }
         }
+        Err(e) => Err(format!("Failed to get email content: {}", e)),
     }
 }
 
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+// Tauri command to get the total count of emails
 #[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
+fn get_bpf_email_count() -> Result<usize, ParseError> {
+    git_parser::get_email_count()
 }
 
-fn parse_email_from_commit(commit: &Commit, repo: &Repository) -> Result<PatchInfo, ParseError> {
-    let message = commit.message().unwrap_or("No message");
-    let author = commit.author().name().unwrap_or("Unknown").to_string();
-    let email = commit.author().email().unwrap_or("unknown@example.com").to_string();
-    let date = commit.time().seconds().to_string();
-    let commit_hash = commit.id().to_string();
+// Tauri command to get the total count of all git commits
+#[tauri::command]
+fn get_total_git_commits() -> Result<usize, ParseError> {
+    git_parser::get_total_git_commits()
+}
 
-    // For kernel mailing lists, the commit message is usually just the subject line
-    // Extract the subject (first line) and use the rest as body
-    let lines: Vec<&str> = message.lines().collect();
-    let subject = if lines.is_empty() {
-        "No subject".to_string()
-    } else {
-        lines[0].to_string()
-    };
+// Tauri command to get recent commits (same as get_bpf_commits for backward compatibility)
+#[tauri::command]
+fn get_recent_bpf_commits() -> Result<Vec<String>, ParseError> {
+    git_parser::get_all_commits()
+}
 
-    // Get the actual patch content (diff)
-    let patch_content = get_patch_content(commit, repo)?;
+// Tauri command to search emails by subject keyword
+#[tauri::command]
+fn search_bpf_emails(keyword: &str, limit: Option<usize>) -> Result<Vec<EmailInfo>, String> {
+    match git_parser::get_all_commits_with_limit(limit) {
+        Ok(all_commits) => {
+            let mut results = Vec::new();
 
-    // Everything after the first line is the body (if any)
-    let body = if lines.len() > 1 {
-        lines[1..].join("\n").trim().to_string()
-    } else {
-        // For kernel patches, if there's no body, show what we can determine
-        if subject.contains("PATCH") {
-            "This is a kernel patch with diff content shown below.".to_string()
-        } else {
-            "No additional commit message content.".to_string()
+            for commit_hash in all_commits {
+                if let Ok(email_content) = git_parser::get_email_content(&commit_hash) {
+                    if let Ok(email) = mail_parser::parse_email_from_content(&commit_hash, &email_content) {
+                        if email.subject.to_lowercase().contains(&keyword.to_lowercase()) {
+                            results.push(email);
+                        }
+                    }
+                }
+            }
+
+            Ok(results)
         }
-    };
+        Err(e) => Err(format!("Failed to get commits: {}", e)),
+    }
+}
 
-    // Get files changed in this commit
-    let files_changed = get_files_changed(commit, repo)?;
+// Tauri command to search emails by author (database-based)
+#[tauri::command]
+async fn search_emails_by_author(author_pattern: String, limit: Option<usize>) -> Result<Vec<EmailInfo>, String> {
+    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
 
-    // Determine patch type based on subject
-    let patch_type = if subject.contains("PATCH") {
-        if subject.contains("RFC") {
-            "RFC Patch".to_string()
-        } else if subject.contains("pull request") || subject.contains("PULL") {
-            "Pull Request".to_string()
-        } else {
-            "Patch".to_string()
+    match db_manager.search_patches_by_author(&author_pattern, limit).await {
+        Ok(patches_with_authors) => {
+            // Convert patches with authors to EmailInfo format
+            let emails: Vec<EmailInfo> = patches_with_authors.into_iter().map(|(patch, author)| {
+                let author_name = author.name.unwrap_or_else(|| author.email.clone());
+                EmailInfo {
+                    commit_hash: patch.commit_hash.unwrap_or_else(|| patch.message_id.clone()),
+                    subject: patch.subject.clone(),
+                    normalized_subject: crate::mail_parser::normalize_subject(&patch.subject),
+                    from: format!("{} <{}>", author_name, author.email),
+                    to: "bpf@vger.kernel.org".to_string(),
+                    date: patch.sent_at.to_rfc3339(),
+                    message_id: patch.message_id,
+                    body: patch.body_text.unwrap_or_default(),
+                    headers: std::collections::HashMap::new(),
+                }
+            }).collect();
+
+            Ok(emails)
         }
-    } else if subject.starts_with("Re:") {
-        "Reply".to_string()
-    } else {
-        "Other".to_string()
-    };
-
-    // Extract threading information from subject
-    let thread_info = if subject.starts_with("Re:") {
-        Some(subject.clone())
-    } else if subject.contains("PATCH") {
-        // Look for series information like "1/5" or "v2"
-        if let Some(series_match) = subject.find("v") {
-            Some(format!("Series: {}", &subject[series_match..]))
-        } else if let Some(patch_num) = subject.find("PATCH") {
-            Some(format!("Patch series starting at: {}", &subject[patch_num..]))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    // Find related patches in the same thread/series
-    let related_patches = find_related_patches(&subject, repo)?;
-
-    // Generate a synthetic Message-ID based on the commit hash
-    let message_id = format!("commit-{}", commit_hash);
-
-    Ok(PatchInfo {
-        subject,
-        author,
-        email,
-        date,
-        message_id,
-        body,
-        commit_hash,
-        files_changed,
-        patch_type,
-        thread_info,
-        patch_content,
-        related_patches,
-    })
+        Err(e) => Err(format!("Failed to search by author: {}", e)),
+    }
 }
 
-fn get_patch_content(commit: &Commit, _repo: &Repository) -> Result<String, ParseError> {
-    // For now, just return a placeholder - getting the actual diff is complex with git2
-    // In a real implementation, you'd use git show or git diff commands
-    Ok(format!("Diff content for commit {} - would show actual patch here", commit.id()))
+// Database setup command (async)
+#[tauri::command]
+async fn setup_database() -> Result<DatabaseSetupResult, String> {
+    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+
+    match db_manager.setup_database().await {
+        Ok(result) => Ok(result),
+        Err(e) => Err(format!("Database setup failed: {}", e)),
+    }
 }
 
-fn get_files_changed(commit: &Commit, _repo: &Repository) -> Result<Vec<String>, ParseError> {
-    // For now, return a placeholder - getting files changed is complex with git2
-    // In a real implementation, you'd use git show --name-only or similar
-    Ok(vec![format!("Files changed in commit {} - would list actual files here", commit.id())])
-}
+// Database population command with progress callback (async)
+#[tauri::command]
+async fn populate_database(limit: Option<usize>, window: tauri::Window) -> Result<DatabasePopulationResult, String> {
+    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
 
-fn find_related_patches(subject: &str, _repo: &Repository) -> Result<Vec<RelatedPatch>, ParseError> {
-    let mut related = Vec::new();
-
-    // For now, return a placeholder - finding related patches requires complex git operations
-    // In a real implementation, you'd search through git log for related subjects
-    if subject.contains("net-next") {
-        related.push(RelatedPatch {
-            subject: "Related net-next patch found".to_string(),
-            commit_hash: "abc123".to_string(),
-            relation_type: "series".to_string(),
+    // Use Tauri event system for progress tracking
+    let progress_fn = move |current: u32, total: u32, commit_hash: String| {
+        let payload = serde_json::json!({
+            "current": current,
+            "total": total,
+            "commit_hash": commit_hash
         });
-    }
+        // Emit event to the window
+        let _ = window.emit("populate-progress", payload);
+    };
 
-    Ok(related)
-}
-
-fn expand_path(path: &str) -> PathBuf {
-    if path.starts_with("~/") {
-        let home = env::var("HOME").unwrap_or_else(|_| "/".to_string());
-        PathBuf::from(home + &path[1..])
-    } else {
-        PathBuf::from(path)
+    match db_manager.populate_database(limit, Some(progress_fn)).await {
+        Ok(result) => Ok(result),
+        Err(e) => Err(format!("Database population failed: {}", e)),
     }
 }
 
-fn get_latest_patch_from_repo(repo_path: &str) -> Result<PatchInfo, ParseError> {
-    let expanded_path = expand_path(repo_path);
-
-    let repo = Repository::open(&expanded_path)
-        .map_err(|e| ParseError {
-            message: format!("Failed to open repository '{}': {}", expanded_path.display(), e)
-        })?;
-
-    // Get the latest commit on the main branch (usually master or main)
-    let head = repo.head()
-        .map_err(|e| ParseError {
-            message: format!("Failed to get HEAD: {}", e)
-        })?;
-
-    let commit = head.peel_to_commit()
-        .map_err(|e| ParseError {
-            message: format!("Failed to peel to commit: {}", e)
-        })?;
-
-    parse_email_from_commit(&commit, &repo)
-}
-
+// Test database connection (async)
 #[tauri::command]
-fn get_latest_patch(repo_path: &str) -> Result<PatchInfo, ParseError> {
-    get_latest_patch_from_repo(repo_path)
+async fn test_database_connection() -> Result<bool, String> {
+    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+
+    match db_manager.test_connection().await {
+        Ok(success) => Ok(success),
+        Err(e) => Err(format!("Database connection test failed: {}", e)),
+    }
+}
+
+// Get database statistics (async)
+#[tauri::command]
+async fn get_database_stats() -> Result<serde_json::Value, String> {
+    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+
+    match db_manager.get_database_stats().await {
+        Ok(stats) => Ok(stats),
+        Err(e) => Err(format!("Failed to get database stats: {}", e)),
+    }
+}
+
+// Reset database (drop all tables) (async)
+#[tauri::command]
+async fn reset_database() -> Result<String, String> {
+    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+
+    match db_manager.reset_database().await {
+        Ok(message) => Ok(message),
+        Err(e) => Err(format!("Database reset failed: {}", e)),
+    }
+}
+
+// Get all authors (async)
+#[tauri::command]
+async fn get_authors() -> Result<Vec<Author>, String> {
+    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+
+    match db_manager.get_authors().await {
+        Ok(authors) => Ok(authors),
+        Err(e) => Err(format!("Failed to get authors: {}", e)),
+    }
+}
+
+// Get patches by author (async)
+#[tauri::command]
+async fn get_patches_by_author(author_id: i64) -> Result<Vec<Patch>, String> {
+    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+
+    match db_manager.get_patches_by_author(author_id).await {
+        Ok(patches) => Ok(patches),
+        Err(e) => Err(format!("Failed to get patches: {}", e)),
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, get_latest_patch])
+        .invoke_handler(tauri::generate_handler![
+            get_bpf_commits,
+            get_bpf_commits_with_limit,
+            get_bpf_email,
+            get_bpf_email_count,
+            get_total_git_commits,
+            get_recent_bpf_commits,
+            search_bpf_emails,
+            search_emails_by_author,
+            setup_database,
+            populate_database,
+            test_database_connection,
+            get_database_stats,
+            reset_database,
+            get_authors,
+            get_patches_by_author
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
