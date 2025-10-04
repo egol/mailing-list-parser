@@ -7,8 +7,24 @@ pub mod git_parser;
 pub mod mail_parser;
 
 // Include the database module
-#[path = "database.rs"]
 pub mod database;
+
+// Include the database API module
+#[path = "database_api.rs"]
+pub mod database_api;
+
+// Include the test threading module (for development)
+#[cfg(test)]
+#[path = "test_threading.rs"]
+pub mod test_threading;
+
+#[cfg(test)]
+#[path = "test_threading_full.rs"]
+pub mod test_threading_full;
+
+#[cfg(test)]
+#[path = "test_threading_db.rs"]
+pub mod test_threading_db;
 
 // Import the Emitter trait for window.emit()
 use tauri::Emitter;
@@ -37,9 +53,15 @@ fn get_bpf_commits_with_limit(limit: Option<usize>) -> Result<Vec<String>, Parse
 fn get_bpf_email(commit_hash: &str) -> Result<EmailInfo, String> {
     match git_parser::get_email_content(commit_hash) {
         Ok(email_content) => {
-            match mail_parser::parse_email_from_content(commit_hash, &email_content) {
-                Ok(email_info) => Ok(email_info),
-                Err(e) => Err(format!("Failed to parse email: {}", e)),
+            // Get commit metadata for author and subject
+            match git_parser::get_single_commit_metadata(commit_hash) {
+                Ok(metadata) => {
+                    match mail_parser::parse_email_from_content(commit_hash, &email_content, &metadata) {
+                        Ok(email_info) => Ok(email_info),
+                        Err(e) => Err(format!("Failed to parse email: {}", e)),
+                    }
+                }
+                Err(e) => Err(format!("Failed to get commit metadata: {}", e)),
             }
         }
         Err(e) => Err(format!("Failed to get email content: {}", e)),
@@ -71,9 +93,15 @@ fn search_bpf_emails(keyword: &str, limit: Option<usize>) -> Result<Vec<EmailInf
         Ok(all_commits) => {
             let mut results = Vec::new();
 
-            for commit_hash in all_commits {
-                if let Ok(email_content) = git_parser::get_email_content(&commit_hash) {
-                    if let Ok(email) = mail_parser::parse_email_from_content(&commit_hash, &email_content) {
+            // Get metadata for all commits
+            let metadata_list = match git_parser::get_commit_metadata(&all_commits) {
+                Ok(list) => list,
+                Err(e) => return Err(format!("Failed to get commit metadata: {}", e)),
+            };
+
+            for (commit_hash, metadata) in all_commits.iter().zip(metadata_list.iter()) {
+                if let Ok(email_content) = git_parser::get_email_content(commit_hash) {
+                    if let Ok(email) = mail_parser::parse_email_from_content(commit_hash, &email_content, metadata) {
                         if email.subject.to_lowercase().contains(&keyword.to_lowercase()) {
                             results.push(email);
                         }
@@ -92,26 +120,8 @@ fn search_bpf_emails(keyword: &str, limit: Option<usize>) -> Result<Vec<EmailInf
 async fn search_emails_by_author(author_pattern: String, limit: Option<usize>) -> Result<Vec<EmailInfo>, String> {
     let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
 
-    match db_manager.search_patches_by_author(&author_pattern, limit).await {
-        Ok(patches_with_authors) => {
-            // Convert patches with authors to EmailInfo format
-            let emails: Vec<EmailInfo> = patches_with_authors.into_iter().map(|(patch, author)| {
-                let author_name = author.name.unwrap_or_else(|| author.email.clone());
-                EmailInfo {
-                    commit_hash: patch.commit_hash.unwrap_or_else(|| patch.message_id.clone()),
-                    subject: patch.subject.clone(),
-                    normalized_subject: crate::mail_parser::normalize_subject(&patch.subject),
-                    from: format!("{} <{}>", author_name, author.email),
-                    to: "bpf@vger.kernel.org".to_string(),
-                    date: patch.sent_at.to_rfc3339(),
-                    message_id: patch.message_id,
-                    body: patch.body_text.unwrap_or_default(),
-                    headers: std::collections::HashMap::new(),
-                }
-            }).collect();
-
-            Ok(emails)
-        }
+    match database_api::search_patches_for_frontend(&mut db_manager, &author_pattern, limit).await {
+        Ok(emails) => Ok(emails),
         Err(e) => Err(format!("Failed to search by author: {}", e)),
     }
 }
@@ -160,13 +170,23 @@ async fn test_database_connection() -> Result<bool, String> {
     }
 }
 
-// Get database statistics (async)
+// Get database statistics (async) - returns simple stats for compatibility
 #[tauri::command]
 async fn get_database_stats() -> Result<serde_json::Value, String> {
     let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
 
-    match db_manager.get_database_stats().await {
-        Ok(stats) => Ok(stats),
+    // Get enhanced stats and convert to simple format for compatibility
+    match database_api::get_enhanced_stats(&mut db_manager).await {
+        Ok(stats) => {
+            let simple_stats = serde_json::json!({
+                "total_authors": stats.total_authors,
+                "total_patches": stats.total_patches,
+                "total_emails": stats.total_emails,
+                "unique_authors": stats.total_authors,
+                "unique_threads": 0  // Not tracked in new schema
+            });
+            Ok(simple_stats)
+        },
         Err(e) => Err(format!("Failed to get database stats: {}", e)),
     }
 }
@@ -182,14 +202,25 @@ async fn reset_database() -> Result<String, String> {
     }
 }
 
-// Get all authors (async)
+// Get all authors with their emails (async)
 #[tauri::command]
-async fn get_authors() -> Result<Vec<Author>, String> {
+async fn get_authors() -> Result<Vec<database_api::AuthorInfo>, String> {
     let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
 
-    match db_manager.get_authors().await {
+    match database_api::get_authors_with_emails(&mut db_manager).await {
         Ok(authors) => Ok(authors),
         Err(e) => Err(format!("Failed to get authors: {}", e)),
+    }
+}
+
+// Get enhanced database statistics (async)
+#[tauri::command]
+async fn get_enhanced_database_stats() -> Result<database_api::DatabaseStats, String> {
+    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+
+    match database_api::get_enhanced_stats(&mut db_manager).await {
+        Ok(stats) => Ok(stats),
+        Err(e) => Err(format!("Failed to get enhanced stats: {}", e)),
     }
 }
 
@@ -201,6 +232,74 @@ async fn get_patches_by_author(author_id: i64) -> Result<Vec<Patch>, String> {
     match db_manager.get_patches_by_author(author_id).await {
         Ok(patches) => Ok(patches),
         Err(e) => Err(format!("Failed to get patches: {}", e)),
+    }
+}
+
+// Threading commands
+
+/// Build thread relationships for all patches
+#[tauri::command]
+async fn build_threads() -> Result<database::ThreadBuildStats, String> {
+    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+
+    match db_manager.build_thread_relationships().await {
+        Ok(stats) => Ok(stats),
+        Err(e) => Err(format!("Failed to build threads: {}", e)),
+    }
+}
+
+/// Get all threads (paginated)
+#[tauri::command]
+async fn get_threads(limit: Option<usize>, offset: Option<usize>) -> Result<Vec<database_api::ThreadSummary>, String> {
+    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+
+    match database_api::get_all_threads(&mut db_manager, limit, offset).await {
+        Ok(threads) => Ok(threads),
+        Err(e) => Err(format!("Failed to get threads: {}", e)),
+    }
+}
+
+/// Get full thread tree by thread ID
+#[tauri::command]
+async fn get_thread_tree(thread_id: i64) -> Result<database_api::ThreadTree, String> {
+    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+
+    match database_api::get_thread_tree(&mut db_manager, thread_id).await {
+        Ok(tree) => Ok(tree),
+        Err(e) => Err(format!("Failed to get thread tree: {}", e)),
+    }
+}
+
+/// Find thread for a specific patch
+#[tauri::command]
+async fn get_thread_for_patch(patch_id: i64) -> Result<Option<database_api::ThreadTree>, String> {
+    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+
+    match database_api::get_thread_for_patch(&mut db_manager, patch_id).await {
+        Ok(thread) => Ok(thread),
+        Err(e) => Err(format!("Failed to find thread for patch: {}", e)),
+    }
+}
+
+/// Search threads by keyword
+#[tauri::command]
+async fn search_threads(keyword: String, limit: Option<usize>) -> Result<Vec<database_api::ThreadSummary>, String> {
+    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+
+    match database_api::search_threads(&mut db_manager, &keyword, limit).await {
+        Ok(threads) => Ok(threads),
+        Err(e) => Err(format!("Failed to search threads: {}", e)),
+    }
+}
+
+/// Get full patch body with diff
+#[tauri::command]
+async fn get_patch_body(patch_id: i64) -> Result<Option<String>, String> {
+    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+
+    match database_api::get_patch_body(&mut db_manager, patch_id).await {
+        Ok(body) => Ok(body),
+        Err(e) => Err(format!("Failed to get patch body: {}", e)),
     }
 }
 
@@ -221,9 +320,16 @@ pub fn run() {
             populate_database,
             test_database_connection,
             get_database_stats,
+            get_enhanced_database_stats,
             reset_database,
             get_authors,
-            get_patches_by_author
+            get_patches_by_author,
+            build_threads,
+            get_threads,
+            get_thread_tree,
+            get_thread_for_patch,
+            search_threads,
+            get_patch_body
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

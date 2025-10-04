@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./App.css";
 import AuthorPatches from "./components/AuthorPatches";
+import ThreadView from "./components/ThreadView";
 
 interface ParseError {
   message: string;
@@ -19,47 +20,23 @@ interface DatabasePopulationResult {
   total_processed: number;
   total_authors_inserted: number;
   total_emails_inserted: number;
-  total_replies_inserted: number;
-  total_commits_inserted: number;
   errors: string[];
 }
 
 interface DatabaseStats {
   authors?: number;
-  emails?: number;
-  email_replies?: number;
-  email_commits?: number;
+  patches?: number;
+  total_authors?: number;
+  total_patches?: number;
   total_emails?: number;
   unique_authors?: number;
   unique_threads?: number;
 }
 
-interface Author {
-  author_id: number;
-  name?: string;
-  email: string;
-  first_seen?: string;
-  patch_count: number;
-}
-
-interface Patch {
-  patch_id: number;
-  author_id: number;
-  message_id: string;
-  subject: string;
-  sent_at: string;
-  commit_hash?: string;
-  body_text?: string;
-  is_series?: boolean;
-  series_number?: number;
-  series_total?: number;
-  created_at?: string;
-}
-
 function App() {
   const [error, setError] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
-  const [currentView, setCurrentView] = useState<'database' | 'authors'>('database');
+  const [currentView, setCurrentView] = useState<'database' | 'authors' | 'threads'>('database');
 
   // Database related state
   const [databaseConnected, setDatabaseConnected] = useState<boolean>(false);
@@ -90,16 +67,31 @@ function App() {
     };
   }, []);
 
+  // Lazy-load max commits count only when user goes to database view
+  useEffect(() => {
+    if (currentView === 'database' && maxCommits === 0 && !commitLimitLoading) {
+      loadMaxCommits();
+    }
+  }, [currentView]);
+
   async function loadInitialData() {
     setLoading(true);
     setError("");
 
     try {
-      // Check if database is already set up and populated
-      await loadDatabaseStats();
-
-      // Load max commits count
-      await loadMaxCommits();
+      // First test database connection
+      try {
+        const connected: boolean = await invoke("test_database_connection");
+        setDatabaseConnected(connected);
+        
+        if (connected) {
+          // If connected, load stats
+          await loadDatabaseStats();
+        }
+      } catch (connErr) {
+        console.error("Database connection test failed:", connErr);
+        setDatabaseConnected(false);
+      }
 
       // Set default view to database since that's our primary interface now
       setCurrentView('database');
@@ -116,31 +108,14 @@ function App() {
 
 
   // Database functions
-  async function testDatabaseConnection() {
-    setLoading(true);
-    setError("");
-
-    try {
-      const connected: boolean = await invoke("test_database_connection");
-      setDatabaseConnected(connected);
-      if (connected) {
-        await loadDatabaseStats();
-      }
-    } catch (err) {
-      const errorMessage = err as string;
-      setError(errorMessage);
-      setDatabaseConnected(false);
-    } finally {
-      setLoading(false);
-    }
-  }
-
   async function loadDatabaseStats() {
     try {
       const stats: DatabaseStats = await invoke("get_database_stats");
       setDatabaseStats(stats);
+      // Don't override connection status here - it's set by connection test
     } catch (err) {
       console.error("Failed to load database stats:", err);
+      // Log but don't set disconnected - stats might fail for other reasons
     }
   }
 
@@ -164,8 +139,13 @@ function App() {
     try {
       const result: DatabaseSetupResult = await invoke("setup_database");
       if (result.success) {
-        setDatabaseConnected(true);
-        await loadDatabaseStats();
+        // Test connection after setup
+        const connected: boolean = await invoke("test_database_connection");
+        setDatabaseConnected(connected);
+        
+        if (connected) {
+          await loadDatabaseStats();
+        }
         alert(`Database setup successful! Created tables: ${result.tables_created.join(", ")}`);
       } else {
         setError(result.message);
@@ -180,7 +160,7 @@ function App() {
 
   async function resetDatabase() {
     const confirmed = confirm(
-      "⚠️ WARNING: This will drop ALL database tables and data!\n\n" +
+      "WARNING: This will drop ALL database tables and data!\n\n" +
       "Are you absolutely sure you want to reset the database?"
     );
 
@@ -194,7 +174,7 @@ function App() {
     try {
       const message: string = await invoke("reset_database");
       await loadDatabaseStats();
-      alert(`✅ ${message}`);
+      alert(message);
     } catch (err) {
       const errorMessage = err as string;
       setError(errorMessage);
@@ -238,9 +218,9 @@ function App() {
         <div className="stats">
           {databaseConnected && (
             <>
-              <span>DB Emails: {databaseStats.total_emails || 0}</span>
-              <span> | Authors: {databaseStats.unique_authors || 0}</span>
-              <span> | Threads: {databaseStats.unique_threads || 0}</span>
+              <span>Patches: {databaseStats.total_patches || 0}</span>
+              <span> | Authors: {databaseStats.total_authors || 0}</span>
+              <span> | Emails: {databaseStats.total_emails || 0}</span>
             </>
           )}
         </div>
@@ -256,6 +236,12 @@ function App() {
             onClick={() => setCurrentView('authors')}
           >
             Authors & Patches
+          </button>
+          <button
+            className={currentView === 'threads' ? 'active' : ''}
+            onClick={() => setCurrentView('threads')}
+          >
+            Threads
           </button>
         </div>
       </header>
@@ -273,48 +259,36 @@ function App() {
           <AuthorPatches />
         )}
 
+        {currentView === 'threads' && (
+          <ThreadView />
+        )}
+
         {currentView === 'database' && (
           <div className="database-section">
             <h2>Database Management</h2>
 
-            <div className="database-status">
-              <div className="status-item">
-                <span className="status-label">Connection Status:</span>
-                <span className={`status-value ${databaseConnected ? 'connected' : 'disconnected'}`}>
-                  {databaseConnected ? 'Connected' : 'Not Connected'}
-                </span>
-                {!databaseConnected && (
-                  <button onClick={testDatabaseConnection} disabled={loading} className="test-btn">
-                    Test Connection
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {databaseConnected && (
+            {databaseConnected ? (
               <>
                 <div className="database-stats">
                   <h3>Database Statistics</h3>
                   <div className="stats-grid">
                     <div className="stat-item">
-                      <span className="stat-label">Total Emails:</span>
+                      <span className="stat-label">Total Patches:</span>
+                      <span className="stat-value">{databaseStats.total_patches || 0}</span>
+                    </div>
+                    <div className="stat-item">
+                      <span className="stat-label">Total Authors:</span>
+                      <span className="stat-value">{databaseStats.total_authors || 0}</span>
+                    </div>
+                    <div className="stat-item">
+                      <span className="stat-label">Email Addresses:</span>
                       <span className="stat-value">{databaseStats.total_emails || 0}</span>
-                    </div>
-                    <div className="stat-item">
-                      <span className="stat-label">Unique Authors:</span>
-                      <span className="stat-value">{databaseStats.unique_authors || 0}</span>
-                    </div>
-                    <div className="stat-item">
-                      <span className="stat-label">Email Threads:</span>
-                      <span className="stat-value">{databaseStats.unique_threads || 0}</span>
                     </div>
                     <div className="stat-item">
                       <span className="stat-label">Raw Tables:</span>
                       <span className="stat-value">
                         Authors: {databaseStats.authors || 0} |
-                        Emails: {databaseStats.emails || 0} |
-                        Replies: {databaseStats.email_replies || 0} |
-                        Commits: {databaseStats.email_commits || 0}
+                        Patches: {databaseStats.patches || 0}
                       </span>
                     </div>
                   </div>
@@ -334,7 +308,7 @@ function App() {
                   </div>
 
                   <div className="action-section danger-zone">
-                    <h3>⚠️ Danger Zone</h3>
+                    <h3>Danger Zone</h3>
                     <p>Reset the database by dropping all tables. This cannot be undone!</p>
                     <button
                       onClick={resetDatabase}
@@ -416,12 +390,10 @@ function App() {
                     {populationResult && (
                       <div className={`population-result ${populationResult.success ? 'success' : 'error'}`}>
                         <h4>Population Results:</h4>
-                        <p>Processed: {populationResult.total_processed} emails</p>
+                        <p>Processed: {populationResult.total_processed} commits</p>
                         <p>Authors: {populationResult.total_authors_inserted}</p>
-                        <p>Emails: {populationResult.total_emails_inserted}</p>
-                        <p>Replies: {populationResult.total_replies_inserted}</p>
-                        <p>Commits: {populationResult.total_commits_inserted}</p>
-                        {!populationResult.success && (
+                        <p>Patches: {populationResult.total_emails_inserted}</p>
+                        {!populationResult.success && populationResult.errors.length > 0 && (
                           <div className="error-details">
                             <p className="error-text">Errors: {populationResult.errors.length}</p>
                             <details>
@@ -441,15 +413,11 @@ function App() {
                   </div>
                 </div>
               </>
-            )}
-
-            {!databaseConnected && (
+            ) : (
               <div className="database-setup">
                 <h3>Database Setup Required</h3>
-                <p>Set up your PostgreSQL database connection and initialize the schema.</p>
-                <button onClick={testDatabaseConnection} disabled={loading} className="test-btn">
-                  Test Database Connection
-                </button>
+                <p>Unable to connect to the database. Please check your connection settings and try again.</p>
+                <p className="connection-hint">Make sure PostgreSQL is running and the DATABASE_URL environment variable is set correctly.</p>
               </div>
             )}
           </div>

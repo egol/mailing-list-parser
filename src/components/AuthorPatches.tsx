@@ -4,8 +4,10 @@ import "./AuthorPatches.css";
 
 interface Author {
   author_id: number;
-  name: string | null;
-  email: string;
+  display_name: string;
+  first_name: string;
+  last_name: string | null;
+  emails: string[];
   first_seen: string | null;
   patch_count: number;
 }
@@ -33,7 +35,18 @@ export default function AuthorPatches() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    loadAuthors();
+    // Add a small delay to prevent loading conflicts when switching tabs quickly
+    let isMounted = true;
+    const timer = setTimeout(() => {
+      if (isMounted) {
+        loadAuthors();
+      }
+    }, 100);
+    
+    return () => {
+      isMounted = false;
+      clearTimeout(timer);
+    };
   }, []);
 
   async function loadAuthors() {
@@ -90,7 +103,7 @@ export default function AuthorPatches() {
           <div className="panel-header">
             <h2>Authors ({authors.length})</h2>
             <button onClick={loadAuthors} className="refresh-btn" title="Refresh">
-              🔄
+              ↻
             </button>
           </div>
 
@@ -104,9 +117,9 @@ export default function AuthorPatches() {
                 onClick={() => loadPatches(author)}
               >
                 <div className="author-name">
-                  {author.name || "Unknown"}
+                  {author.display_name}
                 </div>
-                <div className="author-email">{author.email}</div>
+                <div className="author-email">{author.emails[0] || "No email"}</div>
                 <div className="author-stats">
                   <span className="patch-count">{author.patch_count} patches</span>
                 </div>
@@ -120,7 +133,7 @@ export default function AuthorPatches() {
           <div className="panel-header">
             <h2>
               {selectedAuthor
-                ? `Patches by ${selectedAuthor.name || selectedAuthor.email}`
+                ? `Patches by ${selectedAuthor.display_name}`
                 : "Select an author"}
             </h2>
             {selectedAuthor && (
