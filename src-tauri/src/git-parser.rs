@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use gix::Repository;
+use std::process::Command;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CommitMetadata {
@@ -28,11 +29,22 @@ impl From<gix::open::Error> for ParseError {
     }
 }
 
-/// Open the git repository at the configured path
-/// TODO: Make this configurable instead of hardcoded
+/// Open the git repository at the configured path from environment variable
 fn open_repository() -> Result<Repository, ParseError> {
-    let repo_path = "E:/bpf/git/0.git";
-    let repo = gix::open(repo_path)?;
+    let repo_path = std::env::var("GIT_REPO_PATH")
+        .unwrap_or_else(|_| "E:/bpf/git/0.git".to_string());
+    let repo = gix::open(&repo_path).map_err(|e| ParseError {
+        message: format!("Failed to open repository at '{}': {}", repo_path, e),
+    })?;
+    Ok(repo)
+}
+
+/// Open a repository at a specific path
+#[allow(dead_code)]
+fn open_repository_at_path(path: &str) -> Result<Repository, ParseError> {
+    let repo = gix::open(path).map_err(|e| ParseError {
+        message: format!("Failed to open repository at '{}': {}", path, e),
+    })?;
     Ok(repo)
 }
 
@@ -294,4 +306,122 @@ pub fn get_single_commit_metadata(commit_hash: &str) -> Result<CommitMetadata, P
     results.into_iter().next().ok_or_else(|| ParseError {
         message: format!("Failed to get metadata for commit {}", commit_hash),
     })
+}
+
+/// Sync the git repository by running git fetch (for bare repos) or git pull (for working repos)
+/// Returns detailed output from the git operation
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GitSyncResult {
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+    pub combined_output: String,
+}
+
+pub fn sync_repository(repo_path: Option<&str>) -> Result<GitSyncResult, ParseError> {
+    let default_path = std::env::var("GIT_REPO_PATH")
+        .unwrap_or_else(|_| "E:/bpf/git/0.git".to_string());
+    let repo_path = repo_path.unwrap_or(&default_path);
+    
+    // For bare repositories, use git fetch instead of git pull
+    // Bare repos (like 0.git) don't have working trees
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("fetch")
+        .arg("--all")
+        .arg("--verbose")
+        .output()
+        .map_err(|e| ParseError {
+            message: format!("Failed to execute git fetch: {}", e),
+        })?;
+    
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    
+    // Combine stdout and stderr for full output (git fetch uses stderr for progress)
+    let mut combined = String::new();
+    if !stderr.is_empty() {
+        combined.push_str(&stderr);
+    }
+    if !stdout.is_empty() {
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str(&stdout);
+    }
+    if combined.is_empty() {
+        combined = "Repository synced successfully - already up to date".to_string();
+    }
+    
+    if output.status.success() {
+        Ok(GitSyncResult {
+            success: true,
+            stdout,
+            stderr,
+            combined_output: combined,
+        })
+    } else {
+        Err(ParseError {
+            message: format!("Git fetch failed: {}", combined),
+        })
+    }
+}
+
+/// Check if a git repository exists at the given path
+pub fn check_repository_exists(path: &str) -> bool {
+    std::path::Path::new(path).exists()
+}
+
+/// Clone a git repository to the specified path
+pub fn clone_repository(clone_url: &str, target_path: &str, bare: bool) -> Result<GitSyncResult, ParseError> {
+    // Create parent directory if it doesn't exist
+    if let Some(parent) = std::path::Path::new(target_path).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| ParseError {
+            message: format!("Failed to create directory '{}': {}", parent.display(), e),
+        })?;
+    }
+    
+    let mut cmd = Command::new("git");
+    cmd.arg("clone");
+    
+    if bare {
+        cmd.arg("--bare");
+    }
+    
+    cmd.arg("--verbose")
+       .arg(clone_url)
+       .arg(target_path);
+    
+    let output = cmd.output().map_err(|e| ParseError {
+        message: format!("Failed to execute git clone: {}", e),
+    })?;
+    
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    
+    // Combine output
+    let mut combined = String::new();
+    if !stderr.is_empty() {
+        combined.push_str(&stderr);
+    }
+    if !stdout.is_empty() {
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str(&stdout);
+    }
+    
+    if output.status.success() {
+        Ok(GitSyncResult {
+            success: true,
+            stdout,
+            stderr,
+            combined_output: combined,
+        })
+    } else {
+        Err(ParseError {
+            message: format!("Git clone failed: {}", combined),
+        })
+    }
 }

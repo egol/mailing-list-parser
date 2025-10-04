@@ -67,10 +67,10 @@ impl PatchOps {
                 continue;
             }
             
-            // Validate author name (skip if first name is empty or "Unknown")
-            if email_info.author_first_name.trim().is_empty() || 
-               email_info.author_first_name.trim() == "Unknown" {
-                eprintln!("Warning: Skipping entry with invalid name for email: {}", email);
+            // Validate author name (skip if first name is empty, but allow "Unknown")
+            // We need to keep "Unknown" authors because patches still need author records
+            if email_info.author_first_name.trim().is_empty() {
+                eprintln!("Warning: Skipping entry with empty name for email: {}", email);
                 skipped_count += 1;
                 continue;
             }
@@ -84,8 +84,11 @@ impl PatchOps {
         }
 
         if skipped_count > 0 {
-            eprintln!("Skipped {} entries with invalid email or name data", skipped_count);
+            eprintln!("Skipped {} entries with invalid email or name data during author collection", skipped_count);
         }
+        
+        eprintln!("Collected {} unique author identities from {} emails", 
+                  author_identities.len(), emails.len());
 
         // Deduplicate emails for each author
         for emails_list in author_identities.values_mut() {
@@ -213,7 +216,7 @@ impl PatchOps {
     }
 
     /// Prepare patch data for insertion with email IDs
-    pub fn prepare_patches_with_email_ids(
+    fn prepare_patches_with_email_ids(
         emails: &[(String, EmailInfo)],
         email_to_author_id: &HashMap<String, i64>,
         email_to_email_id: &HashMap<String, i64>
@@ -222,10 +225,22 @@ impl PatchOps {
 
         for (commit_hash, email_info) in emails {
             let email = &email_info.author_email;
-            let author_id = *email_to_author_id.get(email)
-                .ok_or_else(|| format!("Author not found for email: {}", email))?;
-            let email_id = *email_to_email_id.get(email)
-                .ok_or_else(|| format!("Email ID not found for email: {}", email))?;
+            
+            // Try to get IDs from the provided maps
+            let author_id = match email_to_author_id.get(email) {
+                Some(&id) => id,
+                None => {
+                    // This should not happen if upsert was done correctly
+                    return Err(format!("Author not found for email: {}", email).into());
+                }
+            };
+            
+            let email_id = match email_to_email_id.get(email) {
+                Some(&id) => id,
+                None => {
+                    return Err(format!("Email ID not found for email: {}", email).into());
+                }
+            };
 
             // Parse date with multiple format fallbacks
             let parsed_date = Self::parse_email_date(&email_info.date)?;
@@ -260,13 +275,72 @@ impl PatchOps {
     }
 
     /// Insert patches with email IDs in optimized batches
-    pub async fn insert_patches_with_email_ids(
+    async fn insert_patches_with_email_ids(
         emails: &[(String, EmailInfo)],
         email_to_author_id: &HashMap<String, i64>,
         email_to_email_id: &HashMap<String, i64>,
         pool: &Pool<Postgres>
     ) -> Result<u32, Box<dyn std::error::Error>> {
-        let patches_data = Self::prepare_patches_with_email_ids(emails, email_to_author_id, email_to_email_id)?;
+        // First, augment the maps with any missing emails from the database
+        let mut complete_email_to_author_id = email_to_author_id.clone();
+        let mut complete_email_to_email_id = email_to_email_id.clone();
+        
+        // Find emails that are missing from our maps
+        let missing_emails: Vec<&String> = emails.iter()
+            .map(|(_, info)| &info.author_email)
+            .filter(|email| !complete_email_to_email_id.contains_key(*email))
+            .collect();
+        
+        // Query database for missing email mappings
+        if !missing_emails.is_empty() {
+            let unique_missing: std::collections::HashSet<&String> = missing_emails.into_iter().collect();
+            
+            eprintln!("Looking up {} missing emails from database", unique_missing.len());
+            
+            let placeholders: Vec<String> = (1..=unique_missing.len()).map(|i| format!("${}", i)).collect();
+            let query_str = format!(
+                "SELECT ae.email, ae.email_id, ae.author_id 
+                 FROM author_emails ae 
+                 WHERE ae.email IN ({})",
+                placeholders.join(",")
+            );
+            
+            let mut query = sqlx::query(&query_str);
+            for email in &unique_missing {
+                query = query.bind(*email);
+            }
+            
+            let rows = query.fetch_all(pool).await?;
+            eprintln!("Found {} existing emails in database", rows.len());
+            
+            for row in rows {
+                let email: String = row.get(0);
+                let email_id: i64 = row.get(1);
+                let author_id: i64 = row.get(2);
+                complete_email_to_email_id.insert(email.clone(), email_id);
+                complete_email_to_author_id.insert(email, author_id);
+            }
+            
+            // Check if any emails are still missing after database lookup
+            let still_missing: Vec<&String> = emails.iter()
+                .map(|(_, info)| &info.author_email)
+                .filter(|email| !complete_email_to_email_id.contains_key(*email))
+                .collect();
+            
+            if !still_missing.is_empty() {
+                eprintln!("WARNING: {} emails not found in batch or database:", still_missing.len());
+                for email in &still_missing {
+                    eprintln!("  - {}", email);
+                }
+                return Err(format!(
+                    "Missing authors for {} emails. First missing: {}. This may indicate emails were skipped during collection.",
+                    still_missing.len(),
+                    still_missing.first().unwrap()
+                ).into());
+            }
+        }
+        
+        let patches_data = Self::prepare_patches_with_email_ids(emails, &complete_email_to_author_id, &complete_email_to_email_id)?;
 
         if patches_data.is_empty() {
             return Ok(0);

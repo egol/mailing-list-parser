@@ -2,6 +2,10 @@
 #[path = "git-parser.rs"]
 pub mod git_parser;
 
+// Include the git config module
+#[path = "git-config.rs"]
+pub mod git_config;
+
 // Include the mail parser module
 #[path = "mail-parser.rs"]
 pub mod mail_parser;
@@ -248,12 +252,12 @@ async fn build_threads() -> Result<database::ThreadBuildStats, String> {
     }
 }
 
-/// Get all threads (paginated with sorting)
+/// Get all threads (paginated with sorting and filtering)
 #[tauri::command]
-async fn get_threads(limit: Option<usize>, offset: Option<usize>, sort_by: Option<String>) -> Result<Vec<database_api::ThreadSummary>, String> {
+async fn get_threads(limit: Option<usize>, offset: Option<usize>, sort_by: Option<String>, merge_filter: Option<String>) -> Result<Vec<database_api::ThreadSummary>, String> {
     let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
 
-    match database_api::get_all_threads(&mut db_manager, limit, offset, sort_by).await {
+    match database_api::get_all_threads(&mut db_manager, limit, offset, sort_by, merge_filter).await {
         Ok(threads) => Ok(threads),
         Err(e) => Err(format!("Failed to get threads: {}", e)),
     }
@@ -319,10 +323,64 @@ async fn reprocess_merge_notifications() -> Result<database::merges::ReprocessRe
     }
 }
 
+/// Get current git configuration
+#[tauri::command]
+fn get_git_config() -> git_config::GitConfig {
+    git_config::GitConfig::load()
+}
+
+/// Save git configuration
+#[tauri::command]
+fn save_git_config(config: git_config::GitConfig) -> Result<(), String> {
+    config.save()
+}
+
+/// Update git configuration (save and return updated config)
+#[tauri::command]
+fn update_git_config(repo_path: String, clone_url: String) -> Result<git_config::GitConfig, String> {
+    let config = git_config::GitConfig {
+        repo_path,
+        clone_url,
+    };
+    config.save()?;
+    Ok(config)
+}
+
+/// Check if git repository exists at configured path
+#[tauri::command]
+fn check_git_repo_exists(path: Option<String>) -> bool {
+    let config = git_config::GitConfig::load();
+    let check_path = path.unwrap_or(config.repo_path);
+    git_parser::check_repository_exists(&check_path)
+}
+
+/// Clone git repository
+#[tauri::command]
+async fn clone_git_repository(
+    clone_url: String,
+    target_path: String,
+    bare: bool
+) -> Result<git_parser::GitSyncResult, String> {
+    match git_parser::clone_repository(&clone_url, &target_path, bare) {
+        Ok(result) => Ok(result),
+        Err(e) => Err(format!("Failed to clone repository: {}", e)),
+    }
+}
+
+/// Sync the git repository by running git fetch
+#[tauri::command]
+fn sync_git_repository(repo_path: Option<String>) -> Result<git_parser::GitSyncResult, String> {
+    match git_parser::sync_repository(repo_path.as_deref()) {
+        Ok(result) => Ok(result),
+        Err(e) => Err(format!("Failed to sync repository: {}", e)),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_bpf_commits,
             get_bpf_commits_with_limit,
@@ -346,7 +404,13 @@ pub fn run() {
             get_thread_for_patch,
             search_threads,
             get_patch_body,
-            reprocess_merge_notifications
+            reprocess_merge_notifications,
+            get_git_config,
+            save_git_config,
+            update_git_config,
+            check_git_repo_exists,
+            clone_git_repository,
+            sync_git_repository
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

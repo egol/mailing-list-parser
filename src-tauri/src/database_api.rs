@@ -265,7 +265,8 @@ pub async fn get_all_threads(
     db: &mut DatabaseManager,
     limit: Option<usize>,
     offset: Option<usize>,
-    sort_by: Option<String>
+    sort_by: Option<String>,
+    merge_filter: Option<String>
 ) -> Result<Vec<ThreadSummary>, Box<dyn std::error::Error>> {
     db.ensure_connected().await?;
     let pool = db.get_pool()?;
@@ -280,6 +281,13 @@ pub async fn get_all_threads(
         Some("most_replies") => "reply_count DESC",
         Some("most_participants") => "participant_count DESC",
         _ => "last_activity_at DESC", // Default: most recent activity
+    };
+    
+    // Determine merge filter
+    let merge_filter_clause = match merge_filter.as_deref() {
+        Some("merged") => "WHERE mt.thread_id IS NOT NULL",
+        Some("unmerged") => "WHERE mt.thread_id IS NULL",
+        _ => "", // Default: show all
     };
     
     let query = format!(
@@ -299,8 +307,10 @@ pub async fn get_all_threads(
             mt.commit_count
          FROM thread_summary ts
          LEFT JOIN merged_threads mt ON ts.thread_id = mt.thread_id
+         {}
          ORDER BY {}
          LIMIT $1 OFFSET $2",
+        merge_filter_clause,
         order_by
     );
     

@@ -70,6 +70,7 @@ export default function ThreadView() {
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
   const [sortBy, setSortBy] = useState("recent"); // recent, oldest, newest, most_replies, most_participants
+  const [mergeFilter, setMergeFilter] = useState("all"); // all, merged, unmerged
   const [reprocessing, setReprocessing] = useState(false);
   const [reprocessResult, setReprocessResult] = useState<any>(null);
 
@@ -86,7 +87,7 @@ export default function ThreadView() {
       isMounted = false;
       clearTimeout(timer);
     };
-  }, [currentPage, pageSize, sortBy]);
+  }, [currentPage, pageSize, sortBy, mergeFilter]);
 
   async function buildThreads() {
     setLoading(true);
@@ -131,6 +132,7 @@ export default function ThreadView() {
         limit: pageSize,
         offset: offset,
         sortBy: sortBy,
+        mergeFilter: mergeFilter === "all" ? null : mergeFilter,
       });
       setThreads(threadList);
     } catch (err) {
@@ -446,6 +448,18 @@ export default function ThreadView() {
           </div>
 
           <div className="filter-section">
+            <div className="filter-group">
+              <label>Show:</label>
+              <select 
+                value={mergeFilter} 
+                onChange={(e) => { setMergeFilter(e.target.value); setCurrentPage(1); }}
+                className="merge-filter-select"
+              >
+                <option value="all">All Threads</option>
+                <option value="merged">Merged Only</option>
+                <option value="unmerged">Unmerged Only</option>
+              </select>
+            </div>
             <div className="filter-group">
               <label>Sort by:</label>
               <select 

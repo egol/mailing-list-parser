@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 import AuthorPatches from "./components/AuthorPatches";
 import ThreadView from "./components/ThreadView";
@@ -33,6 +34,18 @@ interface DatabaseStats {
   unique_threads?: number;
 }
 
+interface GitConfig {
+  repo_path: string;
+  clone_url: string;
+}
+
+interface GitSyncResult {
+  success: boolean;
+  stdout: string;
+  stderr: string;
+  combined_output: string;
+}
+
 function App() {
   const [error, setError] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
@@ -53,8 +66,22 @@ function App() {
   // Population progress state
   const [populationProgress, setPopulationProgress] = useState<{current: number, total: number, commit_hash: string} | null>(null);
 
+  // Git sync state
+  const [syncLoading, setSyncLoading] = useState<boolean>(false);
+  const [syncResult, setSyncResult] = useState<GitSyncResult | null>(null);
+  
+  // Git configuration state
+  const [gitConfig, setGitConfig] = useState<GitConfig>({ repo_path: "", clone_url: "" });
+  const [repoExists, setRepoExists] = useState<boolean>(false);
+  const [showGitConfig, setShowGitConfig] = useState<boolean>(false);
+  const [cloneLoading, setCloneLoading] = useState<boolean>(false);
+  const [cloneResult, setCloneResult] = useState<GitSyncResult | null>(null);
+  const [configSaving, setConfigSaving] = useState<boolean>(false);
+  const [configSaveMessage, setConfigSaveMessage] = useState<string | null>(null);
+
   useEffect(() => {
     loadInitialData();
+    loadGitConfig();
   }, []);
 
   useEffect(() => {
@@ -211,6 +238,120 @@ function App() {
     }
   }
 
+  async function loadGitConfig() {
+    try {
+      const config: GitConfig = await invoke("get_git_config");
+      setGitConfig(config);
+      
+      const exists: boolean = await invoke("check_git_repo_exists");
+      setRepoExists(exists);
+    } catch (err) {
+      console.error("Failed to load git config:", err);
+    }
+  }
+
+  async function browseForFolder() {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Select Repository Location",
+      });
+      
+      if (selected && typeof selected === 'string') {
+        setGitConfig({ ...gitConfig, repo_path: selected });
+      }
+    } catch (err) {
+      console.error("Failed to open folder picker:", err);
+    }
+  }
+
+  async function saveGitConfig() {
+    if (!gitConfig.clone_url || !gitConfig.repo_path) {
+      setError("Please provide both clone URL and repository path");
+      return;
+    }
+
+    setConfigSaving(true);
+    setError("");
+    setConfigSaveMessage(null);
+
+    try {
+      const updatedConfig: GitConfig = await invoke("update_git_config", {
+        repoPath: gitConfig.repo_path,
+        cloneUrl: gitConfig.clone_url,
+      });
+      
+      setGitConfig(updatedConfig);
+      setConfigSaveMessage("Configuration saved successfully!");
+      setShowGitConfig(false);
+      
+      // Check if repo exists with new path
+      const exists: boolean = await invoke("check_git_repo_exists", { path: updatedConfig.repo_path });
+      setRepoExists(exists);
+      
+      // Clear success message after 3 seconds
+      setTimeout(() => setConfigSaveMessage(null), 3000);
+    } catch (err) {
+      const errorMessage = err as string;
+      setError(errorMessage);
+    } finally {
+      setConfigSaving(false);
+    }
+  }
+
+  async function syncGitRepository() {
+    setSyncLoading(true);
+    setError("");
+    setSyncResult(null);
+
+    try {
+      const result: GitSyncResult = await invoke("sync_git_repository", { repoPath: gitConfig.repo_path || null });
+      setSyncResult(result);
+      
+      // Reload max commits count after sync
+      await loadMaxCommits();
+    } catch (err) {
+      const errorMessage = err as string;
+      setError(errorMessage);
+    } finally {
+      setSyncLoading(false);
+    }
+  }
+
+  async function cloneRepository() {
+    if (!gitConfig.clone_url || !gitConfig.repo_path) {
+      setError("Please provide both clone URL and target path");
+      return;
+    }
+
+    setCloneLoading(true);
+    setError("");
+    setCloneResult(null);
+
+    try {
+      const result: GitSyncResult = await invoke("clone_git_repository", {
+        cloneUrl: gitConfig.clone_url,
+        targetPath: gitConfig.repo_path,
+        bare: true // Clone as bare repository for BPF mailing list
+      });
+      
+      setCloneResult(result);
+      
+      if (result.success) {
+        setRepoExists(true);
+        setShowGitConfig(false);
+        // Reload max commits count after clone
+        await loadMaxCommits();
+      }
+    } catch (err) {
+      const errorMessage = err as string;
+      setError(errorMessage);
+    } finally {
+      setCloneLoading(false);
+    }
+  }
+
   return (
     <main className="app">
       <header className="app-header">
@@ -295,6 +436,182 @@ function App() {
                 </div>
 
                 <div className="database-actions">
+                  <div className="action-section">
+                    <h3>Git Repository</h3>
+                    
+                    {configSaveMessage && (
+                      <div className="config-save-message success">
+                        ✓ {configSaveMessage}
+                      </div>
+                    )}
+
+                    {!repoExists ? (
+                      <>
+                        <div className="repo-status warning">
+                          <strong>⚠ Repository not found</strong>
+                          <p>No repository found at: {gitConfig.repo_path}</p>
+                        </div>
+                        
+                        <button
+                          onClick={() => setShowGitConfig(!showGitConfig)}
+                          className="config-btn"
+                        >
+                          {showGitConfig ? 'Hide Configuration' : 'Configure & Clone Repository'}
+                        </button>
+
+                        {showGitConfig && (
+                          <div className="git-config">
+                            <div className="config-field">
+                              <label htmlFor="clone-url">Clone URL:</label>
+                              <input
+                                id="clone-url"
+                                type="text"
+                                value={gitConfig.clone_url}
+                                onChange={(e) => setGitConfig({ ...gitConfig, clone_url: e.target.value })}
+                                placeholder="https://lore.kernel.org/bpf/0"
+                              />
+                              <small>Default: BPF Mailing List (https://lore.kernel.org/bpf/0)</small>
+                            </div>
+
+                            <div className="config-field">
+                              <label htmlFor="repo-path">Local Path:</label>
+                              <div className="input-with-button">
+                                <input
+                                  id="repo-path"
+                                  type="text"
+                                  value={gitConfig.repo_path}
+                                  onChange={(e) => setGitConfig({ ...gitConfig, repo_path: e.target.value })}
+                                  placeholder="E:/bpf/git/0.git"
+                                />
+                                <button
+                                  onClick={browseForFolder}
+                                  className="browse-btn"
+                                  type="button"
+                                >
+                                  Browse...
+                                </button>
+                              </div>
+                              <small>Where to clone the repository on your system</small>
+                            </div>
+
+                            <div className="button-group">
+                              <button
+                                onClick={saveGitConfig}
+                                disabled={configSaving || !gitConfig.clone_url || !gitConfig.repo_path}
+                                className="save-config-btn"
+                              >
+                                {configSaving ? 'Saving...' : 'Save Configuration'}
+                              </button>
+
+                              <button
+                                onClick={cloneRepository}
+                                disabled={cloneLoading || !gitConfig.clone_url || !gitConfig.repo_path}
+                                className="clone-btn"
+                              >
+                                {cloneLoading ? 'Cloning...' : 'Clone Repository'}
+                              </button>
+                            </div>
+
+                            {cloneResult && (
+                              <div className={`git-output ${cloneResult.success ? 'success' : 'error'}`}>
+                                <strong>{cloneResult.success ? '✓ Clone Successful' : '✗ Clone Failed'}</strong>
+                                <pre>{cloneResult.combined_output}</pre>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <div className="repo-status success">
+                          <strong>✓ Repository configured</strong>
+                          <p>{gitConfig.repo_path}</p>
+                        </div>
+
+                        <button
+                          onClick={syncGitRepository}
+                          disabled={syncLoading}
+                          className="sync-btn"
+                        >
+                          {syncLoading ? 'Syncing...' : 'Sync Repository (git fetch)'}
+                        </button>
+
+                        {syncResult && (
+                          <div className={`git-output ${syncResult.success ? 'success' : 'error'}`}>
+                            <strong>{syncResult.success ? '✓ Sync Complete' : '✗ Sync Failed'}</strong>
+                            <pre>{syncResult.combined_output}</pre>
+                          </div>
+                        )}
+
+                        <button
+                          onClick={() => setShowGitConfig(!showGitConfig)}
+                          className="config-toggle-btn"
+                        >
+                          {showGitConfig ? 'Hide' : 'Edit'} Configuration
+                        </button>
+
+                        {showGitConfig && (
+                          <div className="git-config">
+                            <div className="config-field">
+                              <label htmlFor="edit-clone-url">Clone URL:</label>
+                              <input
+                                id="edit-clone-url"
+                                type="text"
+                                value={gitConfig.clone_url}
+                                onChange={(e) => setGitConfig({ ...gitConfig, clone_url: e.target.value })}
+                                placeholder="https://lore.kernel.org/bpf/0"
+                              />
+                            </div>
+
+                            <div className="config-field">
+                              <label htmlFor="edit-repo-path">Local Path:</label>
+                              <div className="input-with-button">
+                                <input
+                                  id="edit-repo-path"
+                                  type="text"
+                                  value={gitConfig.repo_path}
+                                  onChange={(e) => setGitConfig({ ...gitConfig, repo_path: e.target.value })}
+                                  placeholder="E:/bpf/git/0.git"
+                                />
+                                <button
+                                  onClick={browseForFolder}
+                                  className="browse-btn"
+                                  type="button"
+                                >
+                                  Browse...
+                                </button>
+                              </div>
+                            </div>
+
+                            <div className="button-group">
+                              <button
+                                onClick={saveGitConfig}
+                                disabled={configSaving || !gitConfig.clone_url || !gitConfig.repo_path}
+                                className="save-config-btn"
+                              >
+                                {configSaving ? 'Saving...' : 'Save Changes'}
+                              </button>
+                              
+                              <button
+                                onClick={() => {
+                                  setShowGitConfig(false);
+                                  loadGitConfig(); // Reload to reset changes
+                                }}
+                                className="cancel-btn"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                            
+                            <small className="config-hint">
+                              Configuration is saved in your application data folder
+                            </small>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+
                   <div className="action-section">
                     <h3>Setup Database</h3>
                     <p>Create the necessary tables and views for the mailing list data.</p>

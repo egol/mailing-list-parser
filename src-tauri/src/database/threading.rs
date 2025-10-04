@@ -195,7 +195,9 @@ impl DatabaseManager {
             } else {
                 // Debug: log patches that couldn't find a parent
                 if in_reply_to.is_some() || !references.is_empty() {
-                    println!("  Orphan: {} (has refs but no parent) - {}", patch_id, &subject[..60.min(subject.len())]);
+                    // Safe string truncation at char boundaries
+                    let truncated_subject = subject.chars().take(60).collect::<String>();
+                    println!("  Orphan: {} (has refs but no parent) - {}", patch_id, truncated_subject);
                 }
             }
         }
@@ -221,24 +223,13 @@ impl DatabaseManager {
             .execute(pool)
             .await?;
         
-        // Step 7: Build threads from each root
-        let mut total_threads = 0u32;
-        let mut total_replies = 0u32;
-        let mut max_depth = 0i32;
-        
-        for root_patch in &root_patches {
-            let (thread_replies, thread_max_depth) = self.build_single_thread(
-                root_patch.patch_id,
-                &root_patch.message_id,
-                &root_patch.normalized_subject,
-                &children_map,
-                pool
-            ).await?;
-            
-            total_threads += 1;
-            total_replies += thread_replies;
-            max_depth = max_depth.max(thread_max_depth);
-        }
+        // Step 7: Build threads from each root (optimized with batch inserts)
+        println!("Building {} threads with batch inserts...", root_patches.len());
+        let (total_threads, total_replies, max_depth) = self.build_all_threads_batched(
+            &root_patches,
+            &children_map,
+            pool
+        ).await?;
         
         // Count orphaned patches (patches with references but no parent found)
         let orphaned = patches_info.len() - root_patches.len() - (total_replies as usize);
@@ -257,9 +248,161 @@ impl DatabaseManager {
         })
     }
     
+    /// Build all threads at once with optimized batch inserts
+    /// Much faster than building one thread at a time
+    async fn build_all_threads_batched(
+        &self,
+        root_patches: &[&PatchThreadInfo],
+        children_map: &HashMap<i64, Vec<i64>>,
+        pool: &Pool<Postgres>
+    ) -> Result<(u32, u32, i32), Box<dyn std::error::Error>> {
+        if root_patches.is_empty() {
+            return Ok((0, 0, 0));
+        }
+        
+        // Step 1: Batch insert all thread roots
+        println!("Inserting {} thread roots...", root_patches.len());
+        let mut thread_values = Vec::new();
+        let mut param_count = 1;
+        let mut query_str = String::from("INSERT INTO patch_threads (root_patch_id, root_message_id, subject_base) VALUES ");
+        
+        for (i, root) in root_patches.iter().enumerate() {
+            if i > 0 {
+                query_str.push(',');
+            }
+            query_str.push_str(&format!("(${}, ${}, ${})", param_count, param_count + 1, param_count + 2));
+            param_count += 3;
+            thread_values.push((root.patch_id, &root.message_id, &root.normalized_subject));
+        }
+        
+        query_str.push_str(" ON CONFLICT (root_patch_id) DO UPDATE SET root_message_id = EXCLUDED.root_message_id, subject_base = EXCLUDED.subject_base");
+        
+        let mut query = sqlx::query(&query_str);
+        for (patch_id, message_id, subject) in &thread_values {
+            query = query.bind(patch_id).bind(*message_id).bind(*subject);
+        }
+        query.execute(pool).await?;
+        
+        // Step 2: Get all thread IDs
+        let mut root_to_thread_id: HashMap<i64, i64> = HashMap::new();
+        for root in root_patches {
+            let row = sqlx::query("SELECT thread_id FROM patch_threads WHERE root_patch_id = $1")
+                .bind(root.patch_id)
+                .fetch_one(pool)
+                .await?;
+            let thread_id: i64 = row.get(0);
+            root_to_thread_id.insert(root.patch_id, thread_id);
+        }
+        
+        // Step 3: Build all patch_replies data in parallel
+        println!("Building thread hierarchies...");
+        let root_patch_ids: Vec<i64> = root_patches.iter().map(|r| r.patch_id).collect();
+        
+        let all_replies = tokio::task::spawn_blocking({
+            let children_map = children_map.clone();
+            let root_to_thread_id = root_to_thread_id.clone();
+            
+            move || {
+                let mut all_replies = Vec::new();
+                let mut max_depth = 0i32;
+                
+                for root_id in root_patch_ids {
+                    let thread_id = *root_to_thread_id.get(&root_id).unwrap();
+                    
+                    // Add root
+                    all_replies.push((thread_id, root_id, None, 0i32, vec![root_id]));
+                    
+                    // BFS through children
+                    let mut queue = VecDeque::new();
+                    queue.push_back((root_id, 0i32, vec![root_id]));
+                    
+                    while let Some((current_patch_id, depth, path)) = queue.pop_front() {
+                        if let Some(children) = children_map.get(&current_patch_id) {
+                            for &child_id in children {
+                                let new_depth = depth + 1;
+                                max_depth = max_depth.max(new_depth);
+                                let mut new_path = path.clone();
+                                new_path.push(child_id);
+                                
+                                all_replies.push((thread_id, child_id, Some(current_patch_id), new_depth, new_path.clone()));
+                                queue.push_back((child_id, new_depth, new_path));
+                            }
+                        }
+                    }
+                }
+                
+                (all_replies, max_depth)
+            }
+        }).await?;
+        
+        let (all_replies, max_depth) = all_replies;
+        
+        // Step 4: Batch insert all patch_replies
+        println!("Inserting {} patch replies in batches...", all_replies.len());
+        const BATCH_SIZE: usize = 5000;
+        
+        for batch in all_replies.chunks(BATCH_SIZE) {
+            let mut query_str = String::from("INSERT INTO patch_replies (thread_id, patch_id, parent_patch_id, depth_level, position_in_thread, thread_path) VALUES ");
+            let mut param_count = 1;
+            
+            for (i, _) in batch.iter().enumerate() {
+                if i > 0 {
+                    query_str.push(',');
+                }
+                query_str.push_str(&format!("(${}, ${}, ${}, ${}, ${}, ${})", 
+                    param_count, param_count + 1, param_count + 2, param_count + 3, param_count + 4, param_count + 5));
+                param_count += 6;
+            }
+            
+            let mut query = sqlx::query(&query_str);
+            for (thread_id, patch_id, parent_patch_id, depth, path) in batch {
+                query = query
+                    .bind(thread_id)
+                    .bind(patch_id)
+                    .bind(parent_patch_id)
+                    .bind(depth)
+                    .bind(0i32) // position_in_thread - placeholder
+                    .bind(path);
+            }
+            
+            query.execute(pool).await?;
+        }
+        
+        // Step 5: Calculate and update thread statistics in bulk
+        println!("Calculating thread statistics...");
+        
+        // Use single query to update all thread statistics at once
+        sqlx::query(
+            "UPDATE patch_threads pt
+             SET reply_count = subq.reply_count,
+                 participant_count = subq.participant_count,
+                 updated_at = NOW(),
+                 last_activity_at = subq.last_activity
+             FROM (
+               SELECT 
+                 pr.thread_id,
+                 COUNT(*) FILTER (WHERE pr.parent_patch_id IS NOT NULL) as reply_count,
+                 COUNT(DISTINCT p.author_id) as participant_count,
+                 MAX(p.sent_at) as last_activity
+               FROM patch_replies pr
+               JOIN patches p ON pr.patch_id = p.patch_id
+               GROUP BY pr.thread_id
+             ) subq
+             WHERE pt.thread_id = subq.thread_id"
+        )
+        .execute(pool)
+        .await?;
+        
+        let total_threads = root_patches.len() as u32;
+        let total_replies = all_replies.len() as u32 - total_threads; // Subtract roots
+        
+        Ok((total_threads, total_replies, max_depth))
+    }
+    
     /// Build a single thread starting from a root patch
     /// Uses proper BFS with children_map for O(1) lookups
     /// Includes all patches and replies that reference this thread
+    #[allow(dead_code)]
     async fn build_single_thread(
         &self,
         root_patch_id: i64,
