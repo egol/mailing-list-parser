@@ -39,6 +39,12 @@ CREATE TABLE IF NOT EXISTS patches (
   in_reply_to       TEXT,              -- Message-ID of parent
   thread_references TEXT[],            -- Array of Message-IDs in thread chain
   is_reply          BOOLEAN DEFAULT FALSE,
+  -- Merge notification fields (for patchwork bot emails)
+  is_merge_notification BOOLEAN DEFAULT FALSE,
+  merge_repository      TEXT,          -- e.g., "bpf/bpf-next.git"
+  merge_branch          TEXT,          -- e.g., "master"
+  merge_applied_by      TEXT,          -- e.g., "Alexei Starovoitov <ast@kernel.org>"
+  merge_commit_links    TEXT[],        -- Array of commit URLs/hashes
   created_at        TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -86,6 +92,7 @@ CREATE INDEX IF NOT EXISTS patches_sent_at_idx ON patches (sent_at DESC);
 CREATE INDEX IF NOT EXISTS patches_subject_idx ON patches USING GIN (to_tsvector('english', subject));
 CREATE INDEX IF NOT EXISTS patches_in_reply_to_idx ON patches (in_reply_to);
 CREATE INDEX IF NOT EXISTS patches_is_reply_idx ON patches (is_reply);
+CREATE INDEX IF NOT EXISTS patches_merge_notification_idx ON patches (is_merge_notification) WHERE is_merge_notification = TRUE;
 CREATE INDEX IF NOT EXISTS author_emails_email_idx ON author_emails (email);
 CREATE INDEX IF NOT EXISTS author_emails_author_id_idx ON author_emails (author_id);
 CREATE INDEX IF NOT EXISTS authors_display_name_idx ON authors (display_name);
@@ -122,6 +129,22 @@ SELECT
 FROM patch_threads pt
 JOIN patches p ON pt.root_patch_id = p.patch_id
 JOIN authors a ON p.author_id = a.author_id;
+
+-- View for threads with merge information
+CREATE OR REPLACE VIEW merged_threads AS
+SELECT DISTINCT
+  pt.thread_id,
+  pt.root_patch_id,
+  mp.merge_repository,
+  mp.merge_branch,
+  mp.merge_applied_by,
+  mp.sent_at as merge_date,
+  mp.patch_id as merge_notification_patch_id,
+  array_length(mp.merge_commit_links, 1) as commit_count
+FROM patch_threads pt
+JOIN patch_replies pr ON pt.thread_id = pr.thread_id
+JOIN patches mp ON pr.patch_id = mp.patch_id
+WHERE mp.is_merge_notification = TRUE;
 
 -- Function to update thread statistics
 CREATE OR REPLACE FUNCTION update_thread_stats(p_thread_id BIGINT)

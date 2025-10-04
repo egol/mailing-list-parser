@@ -303,6 +303,22 @@ async fn get_patch_body(patch_id: i64) -> Result<Option<String>, String> {
     }
 }
 
+/// Reprocess all patches to identify and mark merge notifications
+#[tauri::command]
+async fn reprocess_merge_notifications() -> Result<database::merges::ReprocessResult, String> {
+    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+    db_manager.ensure_connected().await
+        .map_err(|e| format!("Database connection error: {}", e))?;
+    
+    let pool = db_manager.get_pool()
+        .map_err(|e| format!("Failed to get pool: {}", e))?;
+    
+    match database::merges::reprocess_merge_notifications(pool).await {
+        Ok(result) => Ok(result),
+        Err(e) => Err(format!("Failed to reprocess merge notifications: {}", e)),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -329,7 +345,8 @@ pub fn run() {
             get_thread_tree,
             get_thread_for_patch,
             search_threads,
-            get_patch_body
+            get_patch_body,
+            reprocess_merge_notifications
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

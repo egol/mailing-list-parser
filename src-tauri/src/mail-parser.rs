@@ -10,6 +10,17 @@ use crate::git_parser::CommitMetadata;
 static WHITESPACE_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").unwrap());
 static EMAIL_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"<([^>]+)>").unwrap());
 
+// Merge notification parsing regexes
+static MERGE_REPO_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)This (?:series|patch) was applied to ([^\s]+)\s+\(([^\)]+)\)").unwrap()
+});
+static MERGE_BY_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)by ([^:]+):").unwrap()
+});
+static MERGE_COMMIT_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?m)^\s*-\s+\[([^\]]+)\]\s+([^\n]+)\n\s+(https?://[^\s]+/c/([a-f0-9]+))").unwrap()
+});
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct EmailInfo {
     pub commit_hash: String,
@@ -255,4 +266,101 @@ pub async fn parse_emails_parallel(emails: Vec<(String, String, CommitMetadata)>
     }
     
     (parsed_emails, errors)
+}
+
+// ============================================================================
+// Merge Notification Detection and Parsing
+// ============================================================================
+
+/// Information extracted from patchwork bot merge notification
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeInfo {
+    pub repository: String,          // e.g., "bpf/bpf-next.git"
+    pub branch: String,              // e.g., "master"
+    pub applied_by: String,          // e.g., "Alexei Starovoitov <ast@kernel.org>"
+    pub commit_links: Vec<String>,   // URLs/hashes of merged commits
+}
+
+/// Detect if an email is a patchwork bot merge notification
+/// Checks author email and body content patterns
+pub fn is_patchwork_merge_notification(email_info: &EmailInfo) -> bool {
+    // Check 1: Author email must be from patchwork bot
+    let email_lower = email_info.author_email.to_lowercase();
+    if !email_lower.contains("patchwork") && !email_lower.contains("git-patchwork-notify") {
+        return false;
+    }
+    
+    // Check 2: Subject must be a reply to a patch
+    let subject_lower = email_info.subject.to_lowercase();
+    if !subject_lower.starts_with("re:") || !subject_lower.contains("patch") {
+        return false;
+    }
+    
+    // Check 3: Body must contain merge notification indicators
+    let body_lower = email_info.body.to_lowercase();
+    if !body_lower.contains("this series was applied to") && !body_lower.contains("this patch was applied to") {
+        return false;
+    }
+    
+    true
+}
+
+/// Parse merge metadata from patchwork bot email body
+/// Returns None if parsing fails
+pub fn parse_merge_metadata(email_info: &EmailInfo) -> Option<MergeInfo> {
+    let body = &email_info.body;
+    
+    // Extract repository and branch
+    let (repository, branch) = if let Some(caps) = MERGE_REPO_REGEX.captures(body) {
+        (
+            caps.get(1)?.as_str().to_string(),
+            caps.get(2)?.as_str().to_string()
+        )
+    } else {
+        eprintln!("Could not extract repository/branch from merge notification");
+        return None;
+    };
+    
+    // Extract who applied the patch
+    let applied_by = if let Some(caps) = MERGE_BY_REGEX.captures(body) {
+        caps.get(1)?.as_str().trim().to_string()
+    } else {
+        "Unknown".to_string()
+    };
+    
+    // Extract commit links
+    let mut commit_links = Vec::new();
+    for caps in MERGE_COMMIT_REGEX.captures_iter(body) {
+        if let Some(url) = caps.get(3) {
+            commit_links.push(url.as_str().to_string());
+        }
+    }
+    
+    // If no structured commit links found, look for any commit URLs
+    if commit_links.is_empty() {
+        let url_regex = Regex::new(r"https?://[^\s]+/c/([a-f0-9]{8,})").ok()?;
+        for caps in url_regex.captures_iter(body) {
+            if let Some(url) = caps.get(0) {
+                commit_links.push(url.as_str().to_string());
+            }
+        }
+    }
+    
+    Some(MergeInfo {
+        repository,
+        branch,
+        applied_by,
+        commit_links,
+    })
+}
+
+/// Check if email is merge notification and extract metadata in one call
+/// Returns (is_merge, Option<MergeInfo>)
+pub fn detect_and_parse_merge(email_info: &EmailInfo) -> (bool, Option<MergeInfo>) {
+    if !is_patchwork_merge_notification(email_info) {
+        return (false, None);
+    }
+    
+    let merge_info = parse_merge_metadata(email_info);
+    (true, merge_info)
 }

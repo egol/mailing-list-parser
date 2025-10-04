@@ -7,6 +7,7 @@ mod authors;
 mod patches;
 mod threading;
 mod population;
+pub mod merges;
 
 // Re-export public types
 pub use config::DatabaseConfig;

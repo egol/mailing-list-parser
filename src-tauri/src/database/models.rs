@@ -56,6 +56,9 @@ pub(crate) struct PatchData {
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
     pub is_reply: bool,
+    // Merge notification fields
+    pub is_merge_notification: bool,
+    pub merge_info: Option<crate::mail_parser::MergeInfo>,
 }
 
 /// Result of database setup operation

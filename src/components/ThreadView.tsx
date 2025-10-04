@@ -2,6 +2,15 @@ import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./ThreadView.css";
 
+interface MergeStatusInfo {
+  is_merged: boolean;
+  merge_date: string;
+  repository: string;
+  branch: string;
+  applied_by: string;
+  commit_count: number;
+}
+
 interface ThreadSummary {
   thread_id: number;
   root_subject: string;
@@ -11,6 +20,7 @@ interface ThreadSummary {
   created_at: string;
   last_activity: string;
   root_patch_id: number;
+  merge_status?: MergeStatusInfo;
 }
 
 interface ThreadNode {
@@ -60,6 +70,8 @@ export default function ThreadView() {
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
   const [sortBy, setSortBy] = useState("recent"); // recent, oldest, newest, most_replies, most_participants
+  const [reprocessing, setReprocessing] = useState(false);
+  const [reprocessResult, setReprocessResult] = useState<any>(null);
 
   useEffect(() => {
     // Add a small delay to prevent loading conflicts when switching tabs quickly
@@ -90,6 +102,22 @@ export default function ThreadView() {
       setError(`Failed to build threads: ${err}`);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function reprocessMerges() {
+    setReprocessing(true);
+    setError("");
+    setReprocessResult(null);
+
+    try {
+      const result: any = await invoke("reprocess_merge_notifications");
+      setReprocessResult(result);
+      await loadThreads(); // Reload to show merge status
+    } catch (err) {
+      setError(`Failed to reprocess merges: ${err}`);
+    } finally {
+      setReprocessing(false);
     }
   }
 
@@ -339,6 +367,9 @@ export default function ThreadView() {
             <button onClick={buildThreads} disabled={loading} className="build-btn">
               {loading ? "Building..." : "Build Thread Relationships"}
             </button>
+            <button onClick={reprocessMerges} disabled={reprocessing} className="build-btn">
+              {reprocessing ? "Processing..." : "Detect Merge Notifications"}
+            </button>
             <button onClick={() => loadThreads()} disabled={loading} className="refresh-btn">
               Refresh
             </button>
@@ -369,6 +400,34 @@ export default function ThreadView() {
                   <span className="stat-label">Processing Time</span>
                 </div>
               </div>
+            </div>
+          )}
+
+          {reprocessResult && (
+            <div className="build-stats">
+              <h3>Merge Notification Detection Results</h3>
+              <div className="stats-grid">
+                <div className="stat">
+                  <span className="stat-value">{reprocessResult.total_checked}</span>
+                  <span className="stat-label">Checked</span>
+                </div>
+                <div className="stat">
+                  <span className="stat-value">{reprocessResult.updated_count}</span>
+                  <span className="stat-label">Detected</span>
+                </div>
+                <div className="stat">
+                  <span className="stat-value">{reprocessResult.failed_count}</span>
+                  <span className="stat-label">Failed</span>
+                </div>
+              </div>
+              {reprocessResult.errors && reprocessResult.errors.length > 0 && (
+                <details style={{ marginTop: '10px', fontSize: '12px' }}>
+                  <summary>Errors ({reprocessResult.errors.length})</summary>
+                  <pre style={{ maxHeight: '200px', overflow: 'auto', background: '#f5f5f5', padding: '10px' }}>
+                    {reprocessResult.errors.join('\n')}
+                  </pre>
+                </details>
+              )}
             </div>
           )}
 
@@ -471,6 +530,14 @@ export default function ThreadView() {
                         SERIES
                       </span>
                     )}
+                    {thread.merge_status && (
+                      <span 
+                        className="merged-badge" 
+                        title={`Merged to ${thread.merge_status.repository} (${thread.merge_status.branch})`}
+                      >
+                        ✓ MERGED
+                      </span>
+                    )}
                     <h3 className="thread-subject">{thread.root_subject}</h3>
                   </div>
                   <div className="thread-info">
@@ -503,6 +570,18 @@ export default function ThreadView() {
       {/* Thread Detail View */}
       {selectedThread && (
         <div className="thread-detail-view">
+          {selectedThread.summary.merge_status && (
+            <div className="merge-info-banner">
+              <span className="merge-icon">✓</span>
+              <div className="merge-details">
+                <strong>Merged</strong> to {selectedThread.summary.merge_status.repository} ({selectedThread.summary.merge_status.branch})
+                <br />
+                <small>
+                  by {selectedThread.summary.merge_status.applied_by} · {formatDate(selectedThread.summary.merge_status.merge_date)} · {selectedThread.summary.merge_status.commit_count} commit{selectedThread.summary.merge_status.commit_count !== 1 ? 's' : ''}
+                </small>
+              </div>
+            </div>
+          )}
           <div className="thread-detail-header">
             <button onClick={() => setSelectedThread(null)} className="back-btn">
               ← Back to Threads

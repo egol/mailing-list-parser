@@ -221,6 +221,17 @@ pub struct ThreadSummary {
     pub created_at: String,
     pub last_activity: String,
     pub root_patch_id: i64,
+    pub merge_status: Option<MergeStatusInfo>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct MergeStatusInfo {
+    pub is_merged: bool,
+    pub merge_date: String,
+    pub repository: String,
+    pub branch: String,
+    pub applied_by: String,
+    pub commit_count: i32,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -273,15 +284,21 @@ pub async fn get_all_threads(
     
     let query = format!(
         "SELECT 
-            thread_id,
-            root_subject,
-            root_author,
-            reply_count,
-            participant_count,
-            created_at,
-            last_activity_at,
-            root_patch_id
-         FROM thread_summary
+            ts.thread_id,
+            ts.root_subject,
+            ts.root_author,
+            ts.reply_count,
+            ts.participant_count,
+            ts.created_at,
+            ts.last_activity_at,
+            ts.root_patch_id,
+            mt.merge_repository,
+            mt.merge_branch,
+            mt.merge_applied_by,
+            mt.merge_date,
+            mt.commit_count
+         FROM thread_summary ts
+         LEFT JOIN merged_threads mt ON ts.thread_id = mt.thread_id
          ORDER BY {}
          LIMIT $1 OFFSET $2",
         order_by
@@ -294,6 +311,19 @@ pub async fn get_all_threads(
     .await?;
     
     let threads = rows.iter().map(|row| {
+        let merge_status = if let Ok(Some(repo)) = row.try_get::<Option<String>, _>(8) {
+            Some(MergeStatusInfo {
+                is_merged: true,
+                merge_date: row.get::<chrono::DateTime<chrono::Utc>, _>(11).to_rfc3339(),
+                repository: repo,
+                branch: row.get::<String, _>(9),
+                applied_by: row.get::<String, _>(10),
+                commit_count: row.get::<Option<i32>, _>(12).unwrap_or(0),
+            })
+        } else {
+            None
+        };
+        
         ThreadSummary {
             thread_id: row.get(0),
             root_subject: row.get(1),
@@ -303,6 +333,7 @@ pub async fn get_all_threads(
             created_at: row.get::<chrono::DateTime<chrono::Utc>, _>(5).to_rfc3339(),
             last_activity: row.get::<chrono::DateTime<chrono::Utc>, _>(6).to_rfc3339(),
             root_patch_id: row.get(7),
+            merge_status,
         }
     }).collect();
     
@@ -667,23 +698,53 @@ pub async fn get_thread_tree(
     
     let root = build_tree(root_id.unwrap(), &mut nodes, &children_map);
     
-    // Get thread summary
+    // Get thread summary with merge status
     let summary_row = sqlx::query(
-        "SELECT * FROM thread_summary WHERE thread_id = $1"
+        "SELECT 
+            ts.thread_id,
+            ts.root_subject,
+            ts.root_author,
+            ts.reply_count,
+            ts.participant_count,
+            ts.created_at,
+            ts.last_activity_at,
+            ts.root_patch_id,
+            mt.merge_repository,
+            mt.merge_branch,
+            mt.merge_applied_by,
+            mt.merge_date,
+            mt.commit_count
+         FROM thread_summary ts
+         LEFT JOIN merged_threads mt ON ts.thread_id = mt.thread_id
+         WHERE ts.thread_id = $1"
     )
     .bind(thread_id)
     .fetch_one(pool)
     .await?;
     
+    let merge_status = if let Ok(Some(repo)) = summary_row.try_get::<Option<String>, _>(8) {
+        Some(MergeStatusInfo {
+            is_merged: true,
+            merge_date: summary_row.get::<chrono::DateTime<chrono::Utc>, _>(11).to_rfc3339(),
+            repository: repo,
+            branch: summary_row.get::<String, _>(9),
+            applied_by: summary_row.get::<String, _>(10),
+            commit_count: summary_row.get::<Option<i32>, _>(12).unwrap_or(0),
+        })
+    } else {
+        None
+    };
+    
     let summary = ThreadSummary {
         thread_id: summary_row.get(0),
-        root_subject: summary_row.get(8),
-        root_author: summary_row.get(10),
+        root_subject: summary_row.get(1),
+        root_author: summary_row.get(2),
         reply_count: summary_row.get(3),
         participant_count: summary_row.get(4),
         created_at: summary_row.get::<chrono::DateTime<chrono::Utc>, _>(5).to_rfc3339(),
-        last_activity: summary_row.get::<chrono::DateTime<chrono::Utc>, _>(7).to_rfc3339(),
-        root_patch_id: summary_row.get(1),
+        last_activity: summary_row.get::<chrono::DateTime<chrono::Utc>, _>(6).to_rfc3339(),
+        root_patch_id: summary_row.get(7),
+        merge_status,
     };
     
     Ok(ThreadTree {
@@ -748,17 +809,23 @@ pub async fn search_threads(
     
     let rows = sqlx::query(
         "SELECT 
-            thread_id,
-            root_subject,
-            root_author,
-            reply_count,
-            participant_count,
-            created_at,
-            last_activity_at,
-            root_patch_id
-         FROM thread_summary
-         WHERE LOWER(root_subject) LIKE $1
-         ORDER BY last_activity_at DESC
+            ts.thread_id,
+            ts.root_subject,
+            ts.root_author,
+            ts.reply_count,
+            ts.participant_count,
+            ts.created_at,
+            ts.last_activity_at,
+            ts.root_patch_id,
+            mt.merge_repository,
+            mt.merge_branch,
+            mt.merge_applied_by,
+            mt.merge_date,
+            mt.commit_count
+         FROM thread_summary ts
+         LEFT JOIN merged_threads mt ON ts.thread_id = mt.thread_id
+         WHERE LOWER(ts.root_subject) LIKE $1
+         ORDER BY ts.last_activity_at DESC
          LIMIT $2"
     )
     .bind(&pattern)
@@ -767,6 +834,19 @@ pub async fn search_threads(
     .await?;
     
     let threads = rows.iter().map(|row| {
+        let merge_status = if let Ok(Some(repo)) = row.try_get::<Option<String>, _>(8) {
+            Some(MergeStatusInfo {
+                is_merged: true,
+                merge_date: row.get::<chrono::DateTime<chrono::Utc>, _>(11).to_rfc3339(),
+                repository: repo,
+                branch: row.get::<String, _>(9),
+                applied_by: row.get::<String, _>(10),
+                commit_count: row.get::<Option<i32>, _>(12).unwrap_or(0),
+            })
+        } else {
+            None
+        };
+        
         ThreadSummary {
             thread_id: row.get(0),
             root_subject: row.get(1),
@@ -776,6 +856,7 @@ pub async fn search_threads(
             created_at: row.get::<chrono::DateTime<chrono::Utc>, _>(5).to_rfc3339(),
             last_activity: row.get::<chrono::DateTime<chrono::Utc>, _>(6).to_rfc3339(),
             root_patch_id: row.get(7),
+            merge_status,
         }
     }).collect();
     

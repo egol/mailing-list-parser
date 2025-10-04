@@ -232,6 +232,9 @@ impl PatchOps {
 
             // Detect if it's a patch series
             let (is_series, series_number, series_total) = Self::detect_patch_series(&email_info.subject);
+            
+            // Detect and parse merge notification
+            let (is_merge, merge_info) = crate::mail_parser::detect_and_parse_merge(email_info);
 
             patches_data.push(PatchData {
                 author_id,
@@ -247,6 +250,9 @@ impl PatchOps {
                 in_reply_to: email_info.in_reply_to.clone(),
                 references: email_info.references.clone(),
                 is_reply: email_info.is_reply,
+                // Merge notification fields
+                is_merge_notification: is_merge,
+                merge_info,
             });
         }
 
@@ -267,8 +273,9 @@ impl PatchOps {
         }
 
         // PostgreSQL has a parameter limit of ~65535
-        // With 13 params per patch, we can do ~5000 patches per query safely
-        const MAX_PATCHES_PER_QUERY: usize = 5000;
+        // With 18 params per patch (including merge fields), we can do ~3640 patches per query
+        // Use 3500 to be safe
+        const MAX_PATCHES_PER_QUERY: usize = 3500;
 
         let mut inserted_patches = 0u32;
 
@@ -283,19 +290,20 @@ impl PatchOps {
 
     /// Execute batch insert for a chunk of patches
     async fn execute_patch_batch_insert(patch_batch: &[PatchData], pool: &Pool<Postgres>) -> Result<u32, Box<dyn std::error::Error>> {
-        let mut query = String::from("INSERT INTO patches (author_id, email_id, message_id, subject, sent_at, commit_hash, body_text, is_series, series_number, series_total, in_reply_to, thread_references, is_reply) VALUES ");
+        let mut query = String::from("INSERT INTO patches (author_id, email_id, message_id, subject, sent_at, commit_hash, body_text, is_series, series_number, series_total, in_reply_to, thread_references, is_reply, is_merge_notification, merge_repository, merge_branch, merge_applied_by, merge_commit_links) VALUES ");
         let mut param_count = 1;
 
         for (i, _) in patch_batch.iter().enumerate() {
             if i > 0 {
                 query.push(',');
             }
-            query.push_str(&format!("(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
+            query.push_str(&format!("(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
                                    param_count, param_count + 1, param_count + 2, param_count + 3,
                                    param_count + 4, param_count + 5, param_count + 6, param_count + 7,
                                    param_count + 8, param_count + 9, param_count + 10, param_count + 11,
-                                   param_count + 12));
-            param_count += 13;
+                                   param_count + 12, param_count + 13, param_count + 14, param_count + 15,
+                                   param_count + 16, param_count + 17));
+            param_count += 18;
         }
 
         query.push_str(" ON CONFLICT (message_id) DO NOTHING");
@@ -303,6 +311,19 @@ impl PatchOps {
         let mut insert_query = sqlx::query(&query);
 
         for patch_data in patch_batch {
+            // Extract merge fields if present
+            let (merge_repo, merge_branch, merge_applied_by, merge_commit_links) = 
+                if let Some(ref merge_info) = patch_data.merge_info {
+                    (
+                        Some(merge_info.repository.clone()),
+                        Some(merge_info.branch.clone()),
+                        Some(merge_info.applied_by.clone()),
+                        Some(merge_info.commit_links.clone())
+                    )
+                } else {
+                    (None, None, None, None)
+                };
+            
             insert_query = insert_query
                 .bind(patch_data.author_id)
                 .bind(patch_data.email_id)
@@ -316,7 +337,12 @@ impl PatchOps {
                 .bind(&patch_data.series_total)
                 .bind(&patch_data.in_reply_to)
                 .bind(&patch_data.references)
-                .bind(&patch_data.is_reply);
+                .bind(&patch_data.is_reply)
+                .bind(&patch_data.is_merge_notification)
+                .bind(merge_repo)
+                .bind(merge_branch)
+                .bind(merge_applied_by)
+                .bind(merge_commit_links);
         }
 
         insert_query.execute(pool).await?;
