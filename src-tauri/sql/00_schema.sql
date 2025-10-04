@@ -112,7 +112,7 @@ SELECT
   pt.root_message_id,
   pt.reply_count,
   pt.participant_count,
-  pt.created_at,
+  p.sent_at as created_at,  -- Use root patch sent_at as thread creation time
   pt.updated_at,
   pt.last_activity_at,
   p.subject as root_subject,

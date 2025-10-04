@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use gix::Repository;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -9,25 +10,10 @@ pub struct CommitMetadata {
     pub subject: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Error, Debug, Serialize, Deserialize)]
+#[error("{message}")]
 pub struct ParseError {
     pub message: String,
-}
-
-impl std::error::Error for ParseError {}
-
-impl std::fmt::Display for ParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl From<std::io::Error> for ParseError {
-    fn from(error: std::io::Error) -> Self {
-        ParseError {
-            message: format!("IO error: {}", error),
-        }
-    }
 }
 
 // Implement Send + Sync for Tauri compatibility

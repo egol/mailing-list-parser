@@ -1,7 +1,7 @@
 /// Full threading test - Tests threading logic without database
 use std::collections::HashMap;
-use crate::git_parser::{get_email_content, get_commit_metadata, get_all_commits_with_limit};
-use crate::mail_parser::{parse_email_from_content, parse_email_headers};
+use mailparse::{parse_mail, MailHeaderMap};
+use crate::git_parser::{get_email_content, get_all_commits_with_limit};
 
 #[derive(Debug, Clone)]
 struct ParsedPatch {
@@ -23,10 +23,10 @@ pub async fn find_commits_by_message_ids(
     
     // Parse target commit first
     let target_content = get_email_content(target_commit)?;
-    let target_headers = parse_email_headers(&target_content);
+    let parsed_target = parse_mail(target_content.as_bytes())?;
     let target_metadata = crate::git_parser::get_single_commit_metadata(target_commit)?;
     
-    let target_msg_id = target_headers.get("message-id")
+    let target_msg_id = parsed_target.headers.get_first_value("message-id")
         .ok_or("Target commit has no message-id")?
         .trim_start_matches('<')
         .trim_end_matches('>')
@@ -36,7 +36,7 @@ pub async fn find_commits_by_message_ids(
     println!("Message-ID: {}", target_msg_id);
     
     // Get references from target
-    let ref_msg_ids: Vec<String> = target_headers.get("references")
+    let ref_msg_ids: Vec<String> = parsed_target.headers.get_first_value("references")
         .map(|refs| {
             refs.split_whitespace()
                 .map(|id| id.trim_start_matches('<').trim_end_matches('>').to_string())
@@ -44,7 +44,7 @@ pub async fn find_commits_by_message_ids(
         })
         .unwrap_or_default();
     
-    let in_reply_to_id = target_headers.get("in-reply-to")
+    let in_reply_to_id = parsed_target.headers.get_first_value("in-reply-to")
         .map(|id| id.trim_start_matches('<').trim_end_matches('>').to_string());
     
     println!("\nIn-Reply-To: {:?}", in_reply_to_id);
@@ -75,17 +75,21 @@ pub async fn find_commits_by_message_ids(
             Err(_) => continue,
         };
         
-        let headers = parse_email_headers(&content);
-        if let Some(msg_id) = headers.get("message-id") {
+        let parsed = match parse_mail(content.as_bytes()) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        
+        if let Some(msg_id) = parsed.headers.get_first_value("message-id") {
             let clean_id = msg_id.trim_start_matches('<').trim_end_matches('>').to_string();
             
             if target_msg_ids.contains(&clean_id) {
                 let metadata = crate::git_parser::get_single_commit_metadata(&commit)?;
                 
-                let in_reply_to = headers.get("in-reply-to")
+                let in_reply_to = parsed.headers.get_first_value("in-reply-to")
                     .map(|id| id.trim_start_matches('<').trim_end_matches('>').to_string());
                 
-                let references: Vec<String> = headers.get("references")
+                let references: Vec<String> = parsed.headers.get_first_value("references")
                     .map(|refs| {
                         refs.split_whitespace()
                             .map(|id| id.trim_start_matches('<').trim_end_matches('>').to_string())
@@ -285,8 +289,8 @@ fn print_tree_node(
     target_msg_id: &str
 ) {
     let actual_depth = depth_map.get(&patch.message_id).copied().unwrap_or(0);
-    let indent = "│   ".repeat(actual_depth);
-    let connector = if actual_depth == 0 { "" } else { "├── " };
+    let indent = "│ ".repeat(actual_depth);
+    let connector = if actual_depth == 0 { "" } else { "├─" };
     let is_target = patch.message_id == target_msg_id;
     let marker = if is_target { " ← TARGET" } else { "" };
     

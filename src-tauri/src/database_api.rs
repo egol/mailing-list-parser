@@ -253,7 +253,8 @@ pub struct ThreadTree {
 pub async fn get_all_threads(
     db: &mut DatabaseManager,
     limit: Option<usize>,
-    offset: Option<usize>
+    offset: Option<usize>,
+    sort_by: Option<String>
 ) -> Result<Vec<ThreadSummary>, Box<dyn std::error::Error>> {
     db.ensure_connected().await?;
     let pool = db.get_pool()?;
@@ -261,7 +262,16 @@ pub async fn get_all_threads(
     let limit_val = limit.unwrap_or(50) as i64;
     let offset_val = offset.unwrap_or(0) as i64;
     
-    let rows = sqlx::query(
+    // Determine sort order
+    let order_by = match sort_by.as_deref() {
+        Some("oldest") => "created_at ASC",
+        Some("newest") => "created_at DESC",
+        Some("most_replies") => "reply_count DESC",
+        Some("most_participants") => "participant_count DESC",
+        _ => "last_activity_at DESC", // Default: most recent activity
+    };
+    
+    let query = format!(
         "SELECT 
             thread_id,
             root_subject,
@@ -272,9 +282,12 @@ pub async fn get_all_threads(
             last_activity_at,
             root_patch_id
          FROM thread_summary
-         ORDER BY last_activity_at DESC
-         LIMIT $1 OFFSET $2"
-    )
+         ORDER BY {}
+         LIMIT $1 OFFSET $2",
+        order_by
+    );
+    
+    let rows = sqlx::query(&query)
     .bind(limit_val)
     .bind(offset_val)
     .fetch_all(pool)

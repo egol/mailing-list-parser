@@ -57,6 +57,9 @@ export default function ThreadView() {
   const [expandedDiffs, setExpandedDiffs] = useState<Set<number>>(new Set());
   const [diffContents, setDiffContents] = useState<Map<number, string>>(new Map());
   const [expandedBodies, setExpandedBodies] = useState<Set<number>>(new Set());
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+  const [sortBy, setSortBy] = useState("recent"); // recent, oldest, newest, most_replies, most_participants
 
   useEffect(() => {
     // Add a small delay to prevent loading conflicts when switching tabs quickly
@@ -71,7 +74,7 @@ export default function ThreadView() {
       isMounted = false;
       clearTimeout(timer);
     };
-  }, []);
+  }, [currentPage, pageSize, sortBy]);
 
   async function buildThreads() {
     setLoading(true);
@@ -90,14 +93,16 @@ export default function ThreadView() {
     }
   }
 
-  async function loadThreads(limit: number = 100) {
+  async function loadThreads() {
     setLoading(true);
     setError("");
 
     try {
+      const offset = (currentPage - 1) * pageSize;
       const threadList: ThreadSummary[] = await invoke("get_threads", {
-        limit,
-        offset: 0,
+        limit: pageSize,
+        offset: offset,
+        sortBy: sortBy,
       });
       setThreads(threadList);
     } catch (err) {
@@ -126,6 +131,7 @@ export default function ThreadView() {
 
   async function searchThreads() {
     if (!searchQuery.trim()) {
+      setCurrentPage(1);
       await loadThreads();
       return;
     }
@@ -136,9 +142,10 @@ export default function ThreadView() {
     try {
       const results: ThreadSummary[] = await invoke("search_threads", {
         keyword: searchQuery,
-        limit: 100,
+        limit: pageSize,
       });
       setThreads(results);
+      setCurrentPage(1); // Reset to first page on search
     } catch (err) {
       setError(`Failed to search threads: ${err}`);
     } finally {
@@ -222,7 +229,7 @@ export default function ThreadView() {
   function renderThreadNode(node: ThreadNode) {
     const isCollapsed = collapsedNodes.has(node.patch_id);
     const hasChildren = node.children.length > 0;
-    const indent = node.depth * 12; // Reduced from 20 to 12 for tighter spacing
+    const indent = node.depth > 0 ? 24 : 0; // Fixed 24px indentation for all replies
     const isDiffExpanded = expandedDiffs.has(node.patch_id);
     const diffContent = diffContents.get(node.patch_id);
     const isBodyExpanded = expandedBodies.has(node.patch_id);
@@ -378,6 +385,36 @@ export default function ThreadView() {
               Search
             </button>
           </div>
+
+          <div className="filter-section">
+            <div className="filter-group">
+              <label>Sort by:</label>
+              <select 
+                value={sortBy} 
+                onChange={(e) => { setSortBy(e.target.value); setCurrentPage(1); }}
+                className="sort-select"
+              >
+                <option value="recent">Most Recent Activity</option>
+                <option value="newest">Newest First</option>
+                <option value="oldest">Oldest First</option>
+                <option value="most_replies">Most Replies</option>
+                <option value="most_participants">Most Participants</option>
+              </select>
+            </div>
+            <div className="filter-group">
+              <label>Per page:</label>
+              <select 
+                value={pageSize} 
+                onChange={(e) => { setPageSize(Number(e.target.value)); setCurrentPage(1); }}
+                className="pagesize-select"
+              >
+                <option value="25">25</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+                <option value="200">200</option>
+              </select>
+            </div>
+          </div>
         </div>
       )}
 
@@ -397,6 +434,26 @@ export default function ThreadView() {
               <p>Click "Build Thread Relationships" to analyze patch emails.</p>
             </div>
           )}
+
+          <div className="pagination-controls">
+            <button 
+              onClick={() => setCurrentPage(p => Math.max(1, p - 1))} 
+              disabled={currentPage === 1 || loading}
+              className="page-btn"
+            >
+              ← Previous
+            </button>
+            <span className="page-info">
+              Page {currentPage}
+            </span>
+            <button 
+              onClick={() => setCurrentPage(p => p + 1)} 
+              disabled={threads.length < pageSize || loading}
+              className="page-btn"
+            >
+              Next →
+            </button>
+          </div>
 
           <div className="threads-list">
             {threads.map((thread) => {

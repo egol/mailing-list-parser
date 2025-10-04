@@ -248,12 +248,12 @@ async fn build_threads() -> Result<database::ThreadBuildStats, String> {
     }
 }
 
-/// Get all threads (paginated)
+/// Get all threads (paginated with sorting)
 #[tauri::command]
-async fn get_threads(limit: Option<usize>, offset: Option<usize>) -> Result<Vec<database_api::ThreadSummary>, String> {
+async fn get_threads(limit: Option<usize>, offset: Option<usize>, sort_by: Option<String>) -> Result<Vec<database_api::ThreadSummary>, String> {
     let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
 
-    match database_api::get_all_threads(&mut db_manager, limit, offset).await {
+    match database_api::get_all_threads(&mut db_manager, limit, offset, sort_by).await {
         Ok(threads) => Ok(threads),
         Err(e) => Err(format!("Failed to get threads: {}", e)),
     }

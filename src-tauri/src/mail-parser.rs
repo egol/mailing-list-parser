@@ -1,7 +1,14 @@
 use std::collections::HashMap;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use once_cell::sync::Lazy;
+use mailparse::parse_mail;
 use crate::git_parser::CommitMetadata;
+
+// Lazy-compiled regexes for performance
+static WHITESPACE_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").unwrap());
+static EMAIL_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"<([^>]+)>").unwrap());
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct EmailInfo {
@@ -26,137 +33,16 @@ pub struct EmailInfo {
     pub is_reply: bool,                 // Quick flag
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ParseError {
-    pub message: String,
-}
-
-impl std::error::Error for ParseError {}
-
-impl std::fmt::Display for ParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl From<std::io::Error> for ParseError {
-    fn from(error: std::io::Error) -> Self {
-        ParseError {
-            message: format!("IO error: {}", error),
-        }
-    }
-}
-
-// Implement Send + Sync for Tauri compatibility
-unsafe impl Send for ParseError {}
-unsafe impl Sync for ParseError {}
-
-/// Parse email headers from raw email content
-/// Returns a HashMap of header field -> value
-/// Handles multi-line headers (header folding)
-pub fn parse_email_headers(email_content: &str) -> HashMap<String, String> {
-    let mut headers = HashMap::new();
-    let header_regex = Regex::new(r"^([A-Za-z-]+):\s*(.+)$").unwrap();
-    let mut current_header: Option<(String, String)> = None;
-
-    for line in email_content.lines() {
-        // Stop parsing headers when we hit an empty line
-        if line.trim().is_empty() {
-            // Save any pending header
-            if let Some((key, value)) = current_header.take() {
-                headers.insert(key, value);
-            }
-            break;
-        }
-
-        // Check if this is a continuation line (starts with whitespace)
-        if line.starts_with(' ') || line.starts_with('\t') {
-            if let Some((ref _key, ref mut value)) = current_header {
-                // Append to current header value
-                value.push(' ');
-                value.push_str(line.trim());
-            }
-            continue;
-        }
-
-        // Save previous header if any
-        if let Some((key, value)) = current_header.take() {
-            headers.insert(key, value);
-        }
-
-        // Try to parse new header
-        if let Some(captures) = header_regex.captures(line.trim()) {
-            if let (Some(key), Some(value)) = (captures.get(1), captures.get(2)) {
-                current_header = Some((
-                    key.as_str().to_lowercase(),
-                    value.as_str().trim().to_string()
-                ));
-            }
-        }
-    }
-
-    // Save any remaining header
-    if let Some((key, value)) = current_header {
-        headers.insert(key, value);
-    }
-
-    headers
-}
-
-/// Extract the email body from raw email content
-/// Everything after the headers until the end
-pub fn extract_email_body(email_content: &str) -> String {
-    let mut in_body = false;
-    let mut body_lines = Vec::new();
-
-    for line in email_content.lines() {
-        if in_body {
-            body_lines.push(line);
-        } else if line.trim().is_empty() {
-            in_body = true;
-        }
-    }
-
-    body_lines.join("\n").trim().to_string()
-}
-
-/// Extract and decode email body based on Content-Transfer-Encoding
-/// Uses quoted_printable and base64 crates for proper decoding
-pub fn extract_and_decode_body(email_content: &str, headers: &HashMap<String, String>) -> String {
-    let raw_body = extract_email_body(email_content);
+#[derive(Error, Debug)]
+pub enum ParseError {
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
     
-    // Check Content-Transfer-Encoding header
-    if let Some(encoding) = headers.get("content-transfer-encoding") {
-        let encoding = encoding.to_lowercase();
-        
-        if encoding.contains("quoted-printable") {
-            // Use quoted_printable crate for robust decoding
-            match quoted_printable::decode(raw_body.as_bytes(), quoted_printable::ParseMode::Robust) {
-                Ok(decoded_bytes) => {
-                    return String::from_utf8_lossy(&decoded_bytes).to_string();
-                }
-                Err(e) => {
-                    eprintln!("Warning: Failed to decode quoted-printable: {}", e);
-                    return raw_body; // Fallback to raw if decoding fails
-                }
-            }
-        } else if encoding.contains("base64") {
-            // Use base64 crate for decoding
-            use base64::{Engine as _, engine::general_purpose};
-            match general_purpose::STANDARD.decode(raw_body.trim()) {
-                Ok(decoded_bytes) => {
-                    return String::from_utf8_lossy(&decoded_bytes).to_string();
-                }
-                Err(e) => {
-                    eprintln!("Warning: Failed to decode base64: {}", e);
-                    return raw_body; // Fallback to raw if decoding fails
-                }
-            }
-        }
-    }
+    #[error("Mail parse error: {0}")]
+    MailParse(#[from] mailparse::MailParseError),
     
-    // No encoding or unsupported encoding, return raw
-    raw_body
+    #[error("Parse error: {0}")]
+    Parse(String),
 }
 
 /// Normalize subject line for threading/comparison
@@ -181,16 +67,14 @@ pub fn normalize_subject(subject: &str) -> String {
     }
 
     // Normalize whitespace: replace multiple spaces with single space
-    let whitespace_regex = Regex::new(r"\s+").unwrap();
-    normalized = whitespace_regex.replace_all(&normalized, " ").to_string();
+    normalized = WHITESPACE_REGEX.replace_all(&normalized, " ").to_string();
 
     normalized.trim().to_string()
 }
 
 /// Extract email address from From/To header and normalize to lowercase
 pub fn extract_email(from_header: &str) -> String {
-    let email_regex = Regex::new(r"<([^>]+)>").unwrap();
-    let email = if let Some(captures) = email_regex.captures(from_header) {
+    let email = if let Some(captures) = EMAIL_REGEX.captures(from_header) {
         captures.get(1).unwrap().as_str()
     } else {
         from_header
@@ -263,9 +147,7 @@ fn sanitize_message_id(msg_id: &str) -> String {
 
 /// Parse threading headers from email
 /// Returns (in_reply_to, references, is_reply)
-/// Note: is_reply should be determined by subject line (Re: prefix), not just threading headers
-/// This is handled by the caller based on the subject
-pub fn parse_threading_info(headers: &HashMap<String, String>) -> (Option<String>, Vec<String>, bool) {
+fn parse_threading_info(headers: &HashMap<String, String>, subject: &str) -> (Option<String>, Vec<String>, bool) {
     // Get In-Reply-To header
     let in_reply_to = headers.get("in-reply-to")
         .map(|s| sanitize_message_id(s));
@@ -282,7 +164,6 @@ pub fn parse_threading_info(headers: &HashMap<String, String>) -> (Option<String
     
     // Determine is_reply based on Subject header (Re: prefix)
     // Patch series members have In-Reply-To but are NOT replies
-    let subject = headers.get("subject").map(|s| s.as_str()).unwrap_or("");
     let is_reply = subject.trim().to_lowercase().starts_with("re:");
     
     (in_reply_to, references, is_reply)
@@ -290,9 +171,19 @@ pub fn parse_threading_info(headers: &HashMap<String, String>) -> (Option<String
 
 /// Parse complete email information from commit hash and email content
 /// Uses commit metadata for author and subject information (much more reliable)
+/// Now uses mailparse crate for proper email parsing and decoding
 pub fn parse_email_from_content(commit_hash: &str, email_content: &str, metadata: &CommitMetadata) -> Result<EmailInfo, ParseError> {
-    let headers = parse_email_headers(email_content);
-    let body = extract_and_decode_body(email_content, &headers);
+    // Use mailparse crate to properly parse the email
+    let parsed = parse_mail(email_content.as_bytes())?;
+    
+    // Extract headers into HashMap
+    let headers: HashMap<String, String> = parsed.headers
+        .iter()
+        .map(|h| (h.get_key().to_lowercase(), h.get_value()))
+        .collect();
+    
+    // Get body - mailparse automatically decodes based on Content-Transfer-Encoding!
+    let body = parsed.get_body().unwrap_or_default();
 
     // Use commit metadata for subject (much more reliable than email headers)
     let subject = &metadata.subject;
@@ -307,7 +198,7 @@ pub fn parse_email_from_content(commit_hash: &str, email_content: &str, metadata
     let from_header = format!("{} <{}>", author_name, author_email);
 
     // Parse threading information
-    let (in_reply_to, references, is_reply) = parse_threading_info(&headers);
+    let (in_reply_to, references, is_reply) = parse_threading_info(&headers, subject);
 
     let email_info = EmailInfo {
         commit_hash: commit_hash.to_string(),

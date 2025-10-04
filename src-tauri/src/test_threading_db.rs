@@ -1,8 +1,9 @@
 /// Database threading test - Tests that reply information can be correctly stored and retrieved from database
 /// This test should produce the same thread tree output as test_threading_full.rs but using the database
 use std::collections::HashMap;
+use mailparse::{parse_mail, MailHeaderMap};
 use crate::git_parser::{get_email_content, get_all_commits_with_limit};
-use crate::mail_parser::{parse_email_headers, parse_email_from_content};
+use crate::mail_parser::parse_email_from_content;
 use crate::database::DatabaseManager;
 
 #[derive(Debug, Clone)]
@@ -36,10 +37,10 @@ async fn setup_test_commits(
     
     // Parse target commit to get its message ID and references
     let target_content = get_email_content(target_commit)?;
-    let target_headers = parse_email_headers(&target_content);
+    let parsed_target = parse_mail(target_content.as_bytes())?;
     let target_metadata = crate::git_parser::get_single_commit_metadata(target_commit)?;
     
-    let target_msg_id = target_headers.get("message-id")
+    let target_msg_id = parsed_target.headers.get_first_value("message-id")
         .ok_or("Target commit has no message-id")?
         .trim_start_matches('<')
         .trim_end_matches('>')
@@ -49,7 +50,7 @@ async fn setup_test_commits(
     println!("Message-ID: {}", target_msg_id);
     
     // Get references from target
-    let ref_msg_ids: Vec<String> = target_headers.get("references")
+    let ref_msg_ids: Vec<String> = parsed_target.headers.get_first_value("references")
         .map(|refs| {
             refs.split_whitespace()
                 .map(|id| id.trim_start_matches('<').trim_end_matches('>').to_string())
@@ -57,7 +58,7 @@ async fn setup_test_commits(
         })
         .unwrap_or_default();
     
-    let in_reply_to_id = target_headers.get("in-reply-to")
+    let in_reply_to_id = parsed_target.headers.get_first_value("in-reply-to")
         .map(|id| id.trim_start_matches('<').trim_end_matches('>').to_string());
     
     println!("\nIn-Reply-To: {:?}", in_reply_to_id);
@@ -88,8 +89,12 @@ async fn setup_test_commits(
             Err(_) => continue,
         };
         
-        let headers = parse_email_headers(&content);
-        if let Some(msg_id) = headers.get("message-id") {
+        let parsed = match parse_mail(content.as_bytes()) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        
+        if let Some(msg_id) = parsed.headers.get_first_value("message-id") {
             let clean_id = msg_id.trim_start_matches('<').trim_end_matches('>').to_string();
             
             if target_msg_ids.contains(&clean_id) {
@@ -474,8 +479,8 @@ fn display_db_thread_tree(root: &DbThreadNode, target_commit: &str) {
 }
 
 fn print_db_node(node: &DbThreadNode, target_commit: &str) {
-    let indent = "│   ".repeat(node.depth as usize);
-    let connector = if node.depth == 0 { "" } else { "├── " };
+    let indent = "│ ".repeat(node.depth as usize);
+    let connector = if node.depth == 0 { "" } else { "├─" };
     let is_target = node.patch.commit_hash == target_commit;
     let marker = if is_target { " ← TARGET" } else { "" };
     

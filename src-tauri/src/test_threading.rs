@@ -1,9 +1,10 @@
 /// Test script for threading logic with deeply nested replies
 use std::collections::HashMap;
+use mailparse::parse_mail;
 
 // Re-export the functions we need to test
 use crate::git_parser::{get_email_content, get_single_commit_metadata};
-use crate::mail_parser::{parse_email_from_content, parse_email_headers, extract_email_body};
+use crate::mail_parser::parse_email_from_content;
 
 /// Parse quote depth from body text
 /// Returns a map of quote_depth -> content
@@ -59,12 +60,15 @@ pub async fn analyze_commit_threading(commit_hash: &str) -> Result<(), Box<dyn s
     let email_content = get_email_content(commit_hash)?;
     println!("Email content length: {} bytes\n", email_content.len());
     
-    // 2. Parse headers
-    let headers = parse_email_headers(&email_content);
+    // 2. Parse email using mailparse
+    let parsed = parse_mail(email_content.as_bytes())?;
+    
+    // Extract headers
     println!("=== Headers ===");
-    for (key, value) in &headers {
+    for header in parsed.headers.iter() {
+        let key = header.get_key().to_lowercase();
         if key == "subject" || key == "in-reply-to" || key == "references" || key == "message-id" {
-            println!("{}: {}", key, value);
+            println!("{}: {}", key, header.get_value());
         }
     }
     
@@ -82,7 +86,7 @@ pub async fn analyze_commit_threading(commit_hash: &str) -> Result<(), Box<dyn s
     println!("References: {:?}", email_info.references);
     
     // 5. Analyze body quote structure
-    let body = extract_email_body(&email_content);
+    let body = parsed.get_body()?;
     println!("\n=== Quote Structure Analysis ===");
     let quote_levels = analyze_quote_structure(&body);
     
