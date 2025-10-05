@@ -31,8 +31,16 @@ impl From<gix::open::Error> for ParseError {
 
 /// Open the git repository at the configured path from environment variable
 fn open_repository() -> Result<Repository, ParseError> {
+    let config = crate::git_config::GitConfig::load();
     let repo_path = std::env::var("GIT_REPO_PATH")
-        .unwrap_or_else(|_| "E:/bpf/git/0.git".to_string());
+        .unwrap_or_else(|_| config.repo_path.clone());
+    
+    if repo_path.is_empty() {
+        return Err(ParseError {
+            message: "Git repository path not configured. Please configure the git repository path in the application settings.".to_string(),
+        });
+    }
+    
     let repo = gix::open(&repo_path).map_err(|e| ParseError {
         message: format!("Failed to open repository at '{}': {}", repo_path, e),
     })?;
@@ -319,9 +327,16 @@ pub struct GitSyncResult {
 }
 
 pub fn sync_repository(repo_path: Option<&str>) -> Result<GitSyncResult, ParseError> {
+    let config = crate::git_config::GitConfig::load();
     let default_path = std::env::var("GIT_REPO_PATH")
-        .unwrap_or_else(|_| "E:/bpf/git/0.git".to_string());
+        .unwrap_or_else(|_| config.repo_path.clone());
     let repo_path = repo_path.unwrap_or(&default_path);
+    
+    if repo_path.is_empty() {
+        return Err(ParseError {
+            message: "Git repository path not configured. Please configure the git repository path in the application settings.".to_string(),
+        });
+    }
     
     // For bare repositories, use git fetch instead of git pull
     // Bare repos (like 0.git) don't have working trees

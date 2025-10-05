@@ -476,13 +476,13 @@ function App() {
                             <div className="config-field">
                               <label htmlFor="repo-path">Local Path:</label>
                               <div className="input-with-button">
-                                <input
-                                  id="repo-path"
-                                  type="text"
-                                  value={gitConfig.repo_path}
-                                  onChange={(e) => setGitConfig({ ...gitConfig, repo_path: e.target.value })}
-                                  placeholder="E:/bpf/git/0.git"
-                                />
+                              <input
+                                id="repo-path"
+                                type="text"
+                                value={gitConfig.repo_path}
+                                onChange={(e) => setGitConfig({ ...gitConfig, repo_path: e.target.value })}
+                                placeholder="/path/to/repository"
+                              />
                                 <button
                                   onClick={browseForFolder}
                                   className="browse-btn"
@@ -566,13 +566,13 @@ function App() {
                             <div className="config-field">
                               <label htmlFor="edit-repo-path">Local Path:</label>
                               <div className="input-with-button">
-                                <input
-                                  id="edit-repo-path"
-                                  type="text"
-                                  value={gitConfig.repo_path}
-                                  onChange={(e) => setGitConfig({ ...gitConfig, repo_path: e.target.value })}
-                                  placeholder="E:/bpf/git/0.git"
-                                />
+                              <input
+                                id="edit-repo-path"
+                                type="text"
+                                value={gitConfig.repo_path}
+                                onChange={(e) => setGitConfig({ ...gitConfig, repo_path: e.target.value })}
+                                placeholder="/path/to/repository"
+                              />
                                 <button
                                   onClick={browseForFolder}
                                   className="browse-btn"

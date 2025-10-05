@@ -13,7 +13,7 @@ pub struct GitConfig {
 impl Default for GitConfig {
     fn default() -> Self {
         Self {
-            repo_path: "E:/bpf/git/0.git".to_string(),
+            repo_path: String::new(),
             clone_url: "https://lore.kernel.org/bpf/0".to_string(),
         }
     }

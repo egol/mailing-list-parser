@@ -210,7 +210,8 @@ impl DatabaseManager {
             // A root is a patch that has no parent in our database
             if !patch_has_parent.contains_key(&patch_info.patch_id) {
                 root_patches.push(patch_info);
-                println!("  Root: {} ({})", patch_info.patch_id, &patch_info.subject[..60.min(patch_info.subject.len())]);
+                let truncated_subject = patch_info.subject.chars().take(60).collect::<String>();
+                println!("  Root: {} ({})", patch_info.patch_id, truncated_subject);
             }
         }
         
