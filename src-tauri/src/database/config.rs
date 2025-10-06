@@ -8,10 +8,11 @@ pub const DEFAULT_PASSWORD: &str = "mysecretpassword";
 pub const DEFAULT_DATABASE: &str = "postgres";
 
 // Connection pool
-pub const MAX_CONNECTIONS: u32 = 500;
-pub const MIN_CONNECTIONS: u32 = 50;
+pub const MAX_CONNECTIONS: u32 = 100;
+pub const MIN_CONNECTIONS: u32 = 1;
 pub const MAX_LIFETIME_SECS: u64 = 300;
 pub const IDLE_TIMEOUT_SECS: u64 = 60;
+pub const ACQUIRE_TIMEOUT_SECS: u64 = 10;
 
 // Batch processing
 pub const PARSE_BATCH_SIZE: usize = 1000;
@@ -52,7 +53,7 @@ pub const CHANNEL_BUFFER_SIZE: usize = 100;
 /// // Get connection string for debugging
 /// println!("Connection string: {}", config.connection_string());
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DatabaseConfig {
     pub host: String,
     pub port: u16,

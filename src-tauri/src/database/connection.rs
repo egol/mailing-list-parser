@@ -11,6 +11,7 @@ impl DatabaseManager {
             .min_connections(MIN_CONNECTIONS)
             .max_lifetime(std::time::Duration::from_secs(MAX_LIFETIME_SECS))
             .idle_timeout(std::time::Duration::from_secs(IDLE_TIMEOUT_SECS))
+            .acquire_timeout(std::time::Duration::from_secs(ACQUIRE_TIMEOUT_SECS))
             .connect(&self.config.connection_string())
             .await?;
 

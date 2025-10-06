@@ -32,6 +32,8 @@ pub mod test_threading_db;
 
 // Import the Emitter trait for window.emit()
 use tauri::Emitter;
+use tauri::State;
+use tokio::sync::Mutex;
 
 // Re-export git parser types for easy access
 pub use git_parser::ParseError;
@@ -39,6 +41,19 @@ pub use git_parser::ParseError;
 pub use mail_parser::{EmailInfo, parse_email_from_content, normalize_subject};
 // Re-export database types for easy access
 pub use database::{DatabaseConfig, DatabaseSetupResult, DatabasePopulationResult, Author, Patch};
+
+// Global database state
+pub struct DatabaseState {
+    manager: Mutex<Option<database::DatabaseManager>>,
+}
+
+impl DatabaseState {
+    pub fn new() -> Self {
+        Self {
+            manager: Mutex::new(None),
+        }
+    }
+}
 
 // Tauri command to get BPF commit hashes (first 10 by default)
 #[tauri::command]
@@ -119,12 +134,96 @@ fn search_bpf_emails(keyword: &str, limit: Option<usize>) -> Result<Vec<EmailInf
     }
 }
 
+// Database connection management commands
+
+/// Get current database configuration (or defaults if not connected)
+#[tauri::command]
+async fn get_database_config(state: State<'_, DatabaseState>) -> Result<DatabaseConfig, String> {
+    let manager_guard = state.manager.lock().await;
+    if manager_guard.is_some() {
+        // For now, we don't store config in the manager, so return defaults
+        // In a production app, you'd want to store and return the actual config used
+        Ok(DatabaseConfig::default())
+    } else {
+        Ok(DatabaseConfig::default())
+    }
+}
+
+/// Check if database is connected
+#[tauri::command]
+async fn is_database_connected(state: State<'_, DatabaseState>) -> Result<bool, String> {
+    let manager_guard = state.manager.lock().await;
+    Ok(manager_guard.is_some())
+}
+
+/// Connect to database with provided configuration
+#[tauri::command]
+async fn connect_database(
+    state: State<'_, DatabaseState>,
+    host: String,
+    port: u16,
+    user: String,
+    password: String,
+    database: String
+) -> Result<String, String> {
+    let config = DatabaseConfig {
+        host,
+        port,
+        user,
+        password,
+        database,
+    };
+
+    let mut db_manager = database::DatabaseManager::new(config.clone());
+    
+    // Try to connect
+    match db_manager.connect().await {
+        Ok(_) => {
+            // Test the connection
+            match db_manager.test_connection().await {
+                Ok(true) => {
+                    // Store in global state
+                    let mut manager_guard = state.manager.lock().await;
+                    *manager_guard = Some(db_manager);
+                    Ok("Successfully connected to database".to_string())
+                },
+                Ok(false) => Err("Connection test failed".to_string()),
+                Err(e) => Err(format!("Connection test failed: {}", e)),
+            }
+        },
+        Err(e) => {
+            // Provide detailed error information
+            let error_msg = format!("Failed to connect to database: {}", e);
+            Err(error_msg)
+        }
+    }
+}
+
+/// Disconnect from database
+#[tauri::command]
+async fn disconnect_database(state: State<'_, DatabaseState>) -> Result<String, String> {
+    let mut manager_guard = state.manager.lock().await;
+    
+    if let Some(mut manager) = manager_guard.take() {
+        manager.close().await;
+        Ok("Disconnected from database".to_string())
+    } else {
+        Err("Not connected to database".to_string())
+    }
+}
+
 // Tauri command to search emails by author (database-based)
 #[tauri::command]
-async fn search_emails_by_author(author_pattern: String, limit: Option<usize>) -> Result<Vec<EmailInfo>, String> {
-    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+async fn search_emails_by_author(
+    state: State<'_, DatabaseState>,
+    author_pattern: String,
+    limit: Option<usize>
+) -> Result<Vec<EmailInfo>, String> {
+    let mut manager_guard = state.manager.lock().await;
+    let db_manager = manager_guard.as_mut()
+        .ok_or("Not connected to database")?;
 
-    match database_api::search_patches_for_frontend(&mut db_manager, &author_pattern, limit).await {
+    match database_api::search_patches_for_frontend(db_manager, &author_pattern, limit).await {
         Ok(emails) => Ok(emails),
         Err(e) => Err(format!("Failed to search by author: {}", e)),
     }
@@ -132,8 +231,10 @@ async fn search_emails_by_author(author_pattern: String, limit: Option<usize>) -
 
 // Database setup command (async)
 #[tauri::command]
-async fn setup_database() -> Result<DatabaseSetupResult, String> {
-    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+async fn setup_database(state: State<'_, DatabaseState>) -> Result<DatabaseSetupResult, String> {
+    let mut manager_guard = state.manager.lock().await;
+    let db_manager = manager_guard.as_mut()
+        .ok_or("Not connected to database")?;
 
     match db_manager.setup_database().await {
         Ok(result) => Ok(result),
@@ -143,8 +244,14 @@ async fn setup_database() -> Result<DatabaseSetupResult, String> {
 
 // Database population command with progress callback (async)
 #[tauri::command]
-async fn populate_database(limit: Option<usize>, window: tauri::Window) -> Result<DatabasePopulationResult, String> {
-    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+async fn populate_database(
+    state: State<'_, DatabaseState>,
+    limit: Option<usize>,
+    window: tauri::Window
+) -> Result<DatabasePopulationResult, String> {
+    let mut manager_guard = state.manager.lock().await;
+    let db_manager = manager_guard.as_mut()
+        .ok_or("Not connected to database")?;
 
     // Use Tauri event system for progress tracking
     let progress_fn = move |current: u32, total: u32, commit_hash: String| {
@@ -165,8 +272,10 @@ async fn populate_database(limit: Option<usize>, window: tauri::Window) -> Resul
 
 // Test database connection (async)
 #[tauri::command]
-async fn test_database_connection() -> Result<bool, String> {
-    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+async fn test_database_connection(state: State<'_, DatabaseState>) -> Result<bool, String> {
+    let mut manager_guard = state.manager.lock().await;
+    let db_manager = manager_guard.as_mut()
+        .ok_or("Not connected to database")?;
 
     match db_manager.test_connection().await {
         Ok(success) => Ok(success),
@@ -176,11 +285,13 @@ async fn test_database_connection() -> Result<bool, String> {
 
 // Get database statistics (async) - returns simple stats for compatibility
 #[tauri::command]
-async fn get_database_stats() -> Result<serde_json::Value, String> {
-    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+async fn get_database_stats(state: State<'_, DatabaseState>) -> Result<serde_json::Value, String> {
+    let mut manager_guard = state.manager.lock().await;
+    let db_manager = manager_guard.as_mut()
+        .ok_or("Not connected to database")?;
 
     // Get enhanced stats and convert to simple format for compatibility
-    match database_api::get_enhanced_stats(&mut db_manager).await {
+    match database_api::get_enhanced_stats(db_manager).await {
         Ok(stats) => {
             let simple_stats = serde_json::json!({
                 "total_authors": stats.total_authors,
@@ -197,8 +308,10 @@ async fn get_database_stats() -> Result<serde_json::Value, String> {
 
 // Reset database (drop all tables) (async)
 #[tauri::command]
-async fn reset_database() -> Result<String, String> {
-    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+async fn reset_database(state: State<'_, DatabaseState>) -> Result<String, String> {
+    let mut manager_guard = state.manager.lock().await;
+    let db_manager = manager_guard.as_mut()
+        .ok_or("Not connected to database")?;
 
     match db_manager.reset_database().await {
         Ok(message) => Ok(message),
@@ -208,10 +321,12 @@ async fn reset_database() -> Result<String, String> {
 
 // Get all authors with their emails (async)
 #[tauri::command]
-async fn get_authors() -> Result<Vec<database_api::AuthorInfo>, String> {
-    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+async fn get_authors(state: State<'_, DatabaseState>) -> Result<Vec<database_api::AuthorInfo>, String> {
+    let mut manager_guard = state.manager.lock().await;
+    let db_manager = manager_guard.as_mut()
+        .ok_or("Not connected to database")?;
 
-    match database_api::get_authors_with_emails(&mut db_manager).await {
+    match database_api::get_authors_with_emails(db_manager).await {
         Ok(authors) => Ok(authors),
         Err(e) => Err(format!("Failed to get authors: {}", e)),
     }
@@ -219,10 +334,12 @@ async fn get_authors() -> Result<Vec<database_api::AuthorInfo>, String> {
 
 // Get enhanced database statistics (async)
 #[tauri::command]
-async fn get_enhanced_database_stats() -> Result<database_api::DatabaseStats, String> {
-    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+async fn get_enhanced_database_stats(state: State<'_, DatabaseState>) -> Result<database_api::DatabaseStats, String> {
+    let mut manager_guard = state.manager.lock().await;
+    let db_manager = manager_guard.as_mut()
+        .ok_or("Not connected to database")?;
 
-    match database_api::get_enhanced_stats(&mut db_manager).await {
+    match database_api::get_enhanced_stats(db_manager).await {
         Ok(stats) => Ok(stats),
         Err(e) => Err(format!("Failed to get enhanced stats: {}", e)),
     }
@@ -230,8 +347,13 @@ async fn get_enhanced_database_stats() -> Result<database_api::DatabaseStats, St
 
 // Get patches by author (async)
 #[tauri::command]
-async fn get_patches_by_author(author_id: i64) -> Result<Vec<Patch>, String> {
-    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+async fn get_patches_by_author(
+    state: State<'_, DatabaseState>,
+    author_id: i64
+) -> Result<Vec<Patch>, String> {
+    let mut manager_guard = state.manager.lock().await;
+    let db_manager = manager_guard.as_mut()
+        .ok_or("Not connected to database")?;
 
     match db_manager.get_patches_by_author(author_id).await {
         Ok(patches) => Ok(patches),
@@ -243,8 +365,10 @@ async fn get_patches_by_author(author_id: i64) -> Result<Vec<Patch>, String> {
 
 /// Build thread relationships for all patches
 #[tauri::command]
-async fn build_threads() -> Result<database::ThreadBuildStats, String> {
-    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+async fn build_threads(state: State<'_, DatabaseState>) -> Result<database::ThreadBuildStats, String> {
+    let mut manager_guard = state.manager.lock().await;
+    let db_manager = manager_guard.as_mut()
+        .ok_or("Not connected to database")?;
 
     match db_manager.build_thread_relationships().await {
         Ok(stats) => Ok(stats),
@@ -254,10 +378,18 @@ async fn build_threads() -> Result<database::ThreadBuildStats, String> {
 
 /// Get all threads (paginated with sorting and filtering)
 #[tauri::command]
-async fn get_threads(limit: Option<usize>, offset: Option<usize>, sort_by: Option<String>, merge_filter: Option<String>) -> Result<Vec<database_api::ThreadSummary>, String> {
-    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+async fn get_threads(
+    state: State<'_, DatabaseState>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    sort_by: Option<String>,
+    merge_filter: Option<String>
+) -> Result<Vec<database_api::ThreadSummary>, String> {
+    let mut manager_guard = state.manager.lock().await;
+    let db_manager = manager_guard.as_mut()
+        .ok_or("Not connected to database")?;
 
-    match database_api::get_all_threads(&mut db_manager, limit, offset, sort_by, merge_filter).await {
+    match database_api::get_all_threads(db_manager, limit, offset, sort_by, merge_filter).await {
         Ok(threads) => Ok(threads),
         Err(e) => Err(format!("Failed to get threads: {}", e)),
     }
@@ -265,10 +397,15 @@ async fn get_threads(limit: Option<usize>, offset: Option<usize>, sort_by: Optio
 
 /// Get full thread tree by thread ID
 #[tauri::command]
-async fn get_thread_tree(thread_id: i64) -> Result<database_api::ThreadTree, String> {
-    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+async fn get_thread_tree(
+    state: State<'_, DatabaseState>,
+    thread_id: i64
+) -> Result<database_api::ThreadTree, String> {
+    let mut manager_guard = state.manager.lock().await;
+    let db_manager = manager_guard.as_mut()
+        .ok_or("Not connected to database")?;
 
-    match database_api::get_thread_tree(&mut db_manager, thread_id).await {
+    match database_api::get_thread_tree(db_manager, thread_id).await {
         Ok(tree) => Ok(tree),
         Err(e) => Err(format!("Failed to get thread tree: {}", e)),
     }
@@ -276,10 +413,15 @@ async fn get_thread_tree(thread_id: i64) -> Result<database_api::ThreadTree, Str
 
 /// Find thread for a specific patch
 #[tauri::command]
-async fn get_thread_for_patch(patch_id: i64) -> Result<Option<database_api::ThreadTree>, String> {
-    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+async fn get_thread_for_patch(
+    state: State<'_, DatabaseState>,
+    patch_id: i64
+) -> Result<Option<database_api::ThreadTree>, String> {
+    let mut manager_guard = state.manager.lock().await;
+    let db_manager = manager_guard.as_mut()
+        .ok_or("Not connected to database")?;
 
-    match database_api::get_thread_for_patch(&mut db_manager, patch_id).await {
+    match database_api::get_thread_for_patch(db_manager, patch_id).await {
         Ok(thread) => Ok(thread),
         Err(e) => Err(format!("Failed to find thread for patch: {}", e)),
     }
@@ -287,10 +429,16 @@ async fn get_thread_for_patch(patch_id: i64) -> Result<Option<database_api::Thre
 
 /// Search threads by keyword
 #[tauri::command]
-async fn search_threads(keyword: String, limit: Option<usize>) -> Result<Vec<database_api::ThreadSummary>, String> {
-    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+async fn search_threads(
+    state: State<'_, DatabaseState>,
+    keyword: String,
+    limit: Option<usize>
+) -> Result<Vec<database_api::ThreadSummary>, String> {
+    let mut manager_guard = state.manager.lock().await;
+    let db_manager = manager_guard.as_mut()
+        .ok_or("Not connected to database")?;
 
-    match database_api::search_threads(&mut db_manager, &keyword, limit).await {
+    match database_api::search_threads(db_manager, &keyword, limit).await {
         Ok(threads) => Ok(threads),
         Err(e) => Err(format!("Failed to search threads: {}", e)),
     }
@@ -298,10 +446,15 @@ async fn search_threads(keyword: String, limit: Option<usize>) -> Result<Vec<dat
 
 /// Get full patch body with diff
 #[tauri::command]
-async fn get_patch_body(patch_id: i64) -> Result<Option<String>, String> {
-    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+async fn get_patch_body(
+    state: State<'_, DatabaseState>,
+    patch_id: i64
+) -> Result<Option<String>, String> {
+    let mut manager_guard = state.manager.lock().await;
+    let db_manager = manager_guard.as_mut()
+        .ok_or("Not connected to database")?;
 
-    match database_api::get_patch_body(&mut db_manager, patch_id).await {
+    match database_api::get_patch_body(db_manager, patch_id).await {
         Ok(body) => Ok(body),
         Err(e) => Err(format!("Failed to get patch body: {}", e)),
     }
@@ -309,8 +462,11 @@ async fn get_patch_body(patch_id: i64) -> Result<Option<String>, String> {
 
 /// Reprocess all patches to identify and mark merge notifications
 #[tauri::command]
-async fn reprocess_merge_notifications() -> Result<database::merges::ReprocessResult, String> {
-    let mut db_manager = database::DatabaseManager::new(DatabaseConfig::from_env());
+async fn reprocess_merge_notifications(state: State<'_, DatabaseState>) -> Result<database::merges::ReprocessResult, String> {
+    let mut manager_guard = state.manager.lock().await;
+    let db_manager = manager_guard.as_mut()
+        .ok_or("Not connected to database")?;
+    
     db_manager.ensure_connected().await
         .map_err(|e| format!("Database connection error: {}", e))?;
     
@@ -381,6 +537,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .manage(DatabaseState::new())
         .invoke_handler(tauri::generate_handler![
             get_bpf_commits,
             get_bpf_commits_with_limit,
@@ -389,6 +546,12 @@ pub fn run() {
             get_total_git_commits,
             get_recent_bpf_commits,
             search_bpf_emails,
+            // Database connection management
+            get_database_config,
+            is_database_connected,
+            connect_database,
+            disconnect_database,
+            // Database operations
             search_emails_by_author,
             setup_database,
             populate_database,
@@ -405,6 +568,7 @@ pub fn run() {
             search_threads,
             get_patch_body,
             reprocess_merge_notifications,
+            // Git configuration
             get_git_config,
             save_git_config,
             update_git_config,

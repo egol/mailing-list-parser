@@ -736,6 +736,70 @@ body {
   font-style: italic;
 }
 
+/* Modal Styles */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 1rem;
+}
+
+.modal-content {
+  background: white;
+  border: 2px solid #ccc;
+  padding: 2rem;
+  max-width: 500px;
+  width: 100%;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.modal-content h2 {
+  margin: 0 0 1rem 0;
+  font-size: 1.25rem;
+  font-weight: bold;
+}
+
+.modal-content p {
+  margin: 0 0 0.5rem 0;
+  font-size: 0.875rem;
+  color: #000;
+  line-height: 1.5;
+}
+
+.modal-content .button-group {
+  margin-top: 1.5rem;
+  display: flex;
+  gap: 0.75rem;
+}
+
+.modal-content .button-group button {
+  flex: 0 1 auto;
+  min-width: auto;
+}
+
+.config-field input[type="number"],
+.config-field input[type="password"] {
+  width: 100%;
+  padding: 0.5rem;
+  border: 1px solid #ccc;
+  font-size: 0.75rem;
+  font-family: Verdana, Geneva, sans-serif;
+  background: white;
+}
+
+.config-field input[type="number"]:focus,
+.config-field input[type="password"]:focus {
+  outline: none;
+  border-color: #ff6600;
+}
+
 /* Mobile Responsive */
 @media (max-width: 768px) {
   .main-content {
@@ -756,5 +820,22 @@ body {
 
   .action-section {
     padding: 0.75rem;
+  }
+
+  .modal-content {
+    padding: 1.5rem;
+    margin: 1rem;
+  }
+
+  .modal-content h2 {
+    font-size: 1.1rem;
+  }
+
+  .modal-content .button-group {
+    flex-direction: column;
+  }
+
+  .modal-content .button-group button {
+    width: 100%;
   }
 }

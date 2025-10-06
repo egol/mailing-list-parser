@@ -46,6 +46,14 @@ interface GitSyncResult {
   combined_output: string;
 }
 
+interface DatabaseConfig {
+  host: string;
+  port: number;
+  user: string;
+  password: string;
+  database: string;
+}
+
 function App() {
   const [error, setError] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
@@ -79,9 +87,26 @@ function App() {
   const [configSaving, setConfigSaving] = useState<boolean>(false);
   const [configSaveMessage, setConfigSaveMessage] = useState<string | null>(null);
 
+  // Database connection state
+  const [dbConfig, setDbConfig] = useState<DatabaseConfig>({
+    host: "localhost",
+    port: 5432,
+    user: "postgres",
+    password: "mysecretpassword",
+    database: "postgres",
+  });
+  const [showDbConfig, setShowDbConfig] = useState<boolean>(false);
+  const [dbConnecting, setDbConnecting] = useState<boolean>(false);
+  const [dbConnectionError, setDbConnectionError] = useState<string | null>(null);
+
+  // Reset database confirmation modal
+  const [showResetConfirm, setShowResetConfirm] = useState<boolean>(false);
+  const [resetLoading, setResetLoading] = useState<boolean>(false);
+
   useEffect(() => {
     loadInitialData();
     loadGitConfig();
+    checkDatabaseConnection();
   }, []);
 
   useEffect(() => {
@@ -101,24 +126,28 @@ function App() {
     }
   }, [currentView]);
 
+  async function checkDatabaseConnection() {
+    try {
+      const connected: boolean = await invoke("is_database_connected");
+      setDatabaseConnected(connected);
+      
+      if (connected) {
+        // If connected, load stats
+        await loadDatabaseStats();
+      }
+    } catch (err) {
+      console.error("Failed to check database connection:", err);
+      setDatabaseConnected(false);
+    }
+  }
+
   async function loadInitialData() {
     setLoading(true);
     setError("");
 
     try {
-      // First test database connection
-      try {
-        const connected: boolean = await invoke("test_database_connection");
-        setDatabaseConnected(connected);
-        
-        if (connected) {
-          // If connected, load stats
-          await loadDatabaseStats();
-        }
-      } catch (connErr) {
-        console.error("Database connection test failed:", connErr);
-        setDatabaseConnected(false);
-      }
+      // Check if database is already connected (but don't auto-connect)
+      await checkDatabaseConnection();
 
       // Set default view to database since that's our primary interface now
       setCurrentView('database');
@@ -128,6 +157,48 @@ function App() {
       setError(errorMessage.message);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function connectToDatabase() {
+    setDbConnecting(true);
+    setDbConnectionError(null);
+    setError("");
+
+    try {
+      const message: string = await invoke("connect_database", {
+        host: dbConfig.host,
+        port: dbConfig.port,
+        user: dbConfig.user,
+        password: dbConfig.password,
+        database: dbConfig.database,
+      });
+      
+      setDatabaseConnected(true);
+      setShowDbConfig(false);
+      
+      // Load database stats after connection
+      await loadDatabaseStats();
+      
+      console.log(message);
+    } catch (err) {
+      const errorMessage = err as string;
+      setDbConnectionError(errorMessage);
+      setDatabaseConnected(false);
+    } finally {
+      setDbConnecting(false);
+    }
+  }
+
+  async function disconnectFromDatabase() {
+    try {
+      const message: string = await invoke("disconnect_database");
+      setDatabaseConnected(false);
+      setDatabaseStats({});
+      console.log(message);
+    } catch (err) {
+      const errorMessage = err as string;
+      setError(errorMessage);
     }
   }
 
@@ -173,7 +244,7 @@ function App() {
         if (connected) {
           await loadDatabaseStats();
         }
-        alert(`Database setup successful! Created tables: ${result.tables_created.join(", ")}`);
+        console.log(`Database setup successful! Created tables: ${result.tables_created.join(", ")}`);
       } else {
         setError(result.message);
       }
@@ -185,28 +256,22 @@ function App() {
     }
   }
 
-  async function resetDatabase() {
-    const confirmed = confirm(
-      "WARNING: This will drop ALL database tables and data!\n\n" +
-      "Are you absolutely sure you want to reset the database?"
-    );
-
-    if (!confirmed) {
-      return;
-    }
-
-    setLoading(true);
+  async function confirmResetDatabase() {
+    setResetLoading(true);
     setError("");
 
     try {
       const message: string = await invoke("reset_database");
       await loadDatabaseStats();
-      alert(message);
+      setShowResetConfirm(false);
+      // Show success message in the error area (it's not really an error)
+      console.log(message);
     } catch (err) {
       const errorMessage = err as string;
       setError(errorMessage);
+      setShowResetConfirm(false);
     } finally {
-      setLoading(false);
+      setResetLoading(false);
     }
   }
 
@@ -357,12 +422,15 @@ function App() {
       <header className="app-header">
         <h1>BPF Mailing List Parser</h1>
         <div className="stats">
-          {databaseConnected && (
+          {databaseConnected ? (
             <>
-              <span>Patches: {databaseStats.total_patches || 0}</span>
+              <span style={{ color: '#4caf50', fontWeight: 'bold' }}>● Connected</span>
+              <span> | Patches: {databaseStats.total_patches || 0}</span>
               <span> | Authors: {databaseStats.total_authors || 0}</span>
               <span> | Emails: {databaseStats.total_emails || 0}</span>
             </>
+          ) : (
+            <span style={{ color: '#ff9800', fontWeight: 'bold' }}>○ Not Connected</span>
           )}
         </div>
         <div className="nav-tabs">
@@ -436,6 +504,21 @@ function App() {
                 </div>
 
                 <div className="database-actions">
+                  <div className="action-section">
+                    <h3>Database Connection</h3>
+                    <div className="repo-status success">
+                      <strong>✓ Connected to database</strong>
+                      <p>{dbConfig.user}@{dbConfig.host}:{dbConfig.port}/{dbConfig.database}</p>
+                    </div>
+                    <button
+                      onClick={disconnectFromDatabase}
+                      className="reset-btn"
+                      style={{ backgroundColor: '#f44336' }}
+                    >
+                      Disconnect
+                    </button>
+                  </div>
+
                   <div className="action-section">
                     <h3>Git Repository</h3>
                     
@@ -628,11 +711,11 @@ function App() {
                     <h3>Danger Zone</h3>
                     <p>Reset the database by dropping all tables. This cannot be undone!</p>
                     <button
-                      onClick={resetDatabase}
-                      disabled={loading}
+                      onClick={() => setShowResetConfirm(true)}
+                      disabled={resetLoading}
                       className="reset-btn"
                     >
-                      {loading ? 'Resetting...' : 'Reset Database (Drop All Tables)'}
+                      Reset Database (Drop All Tables)
                     </button>
                   </div>
 
@@ -732,9 +815,109 @@ function App() {
               </>
             ) : (
               <div className="database-setup">
-                <h3>Database Setup Required</h3>
-                <p>Unable to connect to the database. Please check your connection settings and try again.</p>
-                <p className="connection-hint">Make sure PostgreSQL is running and the DATABASE_URL environment variable is set correctly.</p>
+                <h3>Database Connection</h3>
+                <p>Connect to your PostgreSQL database to manage mailing list data.</p>
+                
+                {dbConnectionError && (
+                  <div className="error-message">
+                    <strong>Connection Error:</strong> {dbConnectionError}
+                  </div>
+                )}
+
+                <button
+                  onClick={() => setShowDbConfig(!showDbConfig)}
+                  className="config-btn"
+                >
+                  {showDbConfig ? 'Hide Connection Settings' : 'Configure & Connect'}
+                </button>
+
+                {showDbConfig && (
+                  <div className="git-config">
+                    <div className="config-field">
+                      <label htmlFor="db-host">Host:</label>
+                      <input
+                        id="db-host"
+                        type="text"
+                        value={dbConfig.host}
+                        onChange={(e) => setDbConfig({ ...dbConfig, host: e.target.value })}
+                        placeholder="localhost"
+                      />
+                      <small>Database server hostname or IP address</small>
+                    </div>
+
+                    <div className="config-field">
+                      <label htmlFor="db-port">Port:</label>
+                      <input
+                        id="db-port"
+                        type="number"
+                        value={dbConfig.port}
+                        onChange={(e) => setDbConfig({ ...dbConfig, port: parseInt(e.target.value) || 5432 })}
+                        placeholder="5432"
+                      />
+                      <small>PostgreSQL port (default: 5432)</small>
+                    </div>
+
+                    <div className="config-field">
+                      <label htmlFor="db-user">Username:</label>
+                      <input
+                        id="db-user"
+                        type="text"
+                        value={dbConfig.user}
+                        onChange={(e) => setDbConfig({ ...dbConfig, user: e.target.value })}
+                        placeholder="postgres"
+                      />
+                      <small>Database username</small>
+                    </div>
+
+                    <div className="config-field">
+                      <label htmlFor="db-password">Password:</label>
+                      <input
+                        id="db-password"
+                        type="password"
+                        value={dbConfig.password}
+                        onChange={(e) => setDbConfig({ ...dbConfig, password: e.target.value })}
+                        placeholder="mysecretpassword"
+                      />
+                      <small>Database password</small>
+                    </div>
+
+                    <div className="config-field">
+                      <label htmlFor="db-database">Database Name:</label>
+                      <input
+                        id="db-database"
+                        type="text"
+                        value={dbConfig.database}
+                        onChange={(e) => setDbConfig({ ...dbConfig, database: e.target.value })}
+                        placeholder="postgres"
+                      />
+                      <small>Name of the database to use</small>
+                    </div>
+
+                    <div className="button-group">
+                      <button
+                        onClick={connectToDatabase}
+                        disabled={dbConnecting || !dbConfig.host || !dbConfig.user || !dbConfig.database}
+                        className="clone-btn"
+                      >
+                        {dbConnecting ? 'Connecting...' : 'Connect to Database'}
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          setShowDbConfig(false);
+                          setDbConnectionError(null);
+                        }}
+                        className="cancel-btn"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <div className="connection-hint" style={{ marginTop: '1rem' }}>
+                  <strong>Note:</strong> Make sure PostgreSQL is running before connecting.
+                </div>
               </div>
             )}
           </div>
@@ -744,6 +927,40 @@ function App() {
           <div className="loading">
             <div className="spinner"></div>
             <span>Loading...</span>
+          </div>
+        )}
+
+        {/* Reset Database Confirmation Modal */}
+        {showResetConfirm && (
+          <div className="modal-overlay" onClick={() => !resetLoading && setShowResetConfirm(false)}>
+            <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+              <h2 style={{ color: '#f44336' }}>⚠️ Warning: Reset Database</h2>
+              <p style={{ fontSize: '1.1em', marginBottom: '1rem' }}>
+                This will <strong>permanently delete ALL</strong> database tables and data!
+              </p>
+              <p style={{ marginBottom: '1.5rem' }}>
+                This action <strong>CANNOT be undone</strong>. Are you absolutely sure?
+              </p>
+              
+              <div className="button-group" style={{ justifyContent: 'flex-end', gap: '1rem' }}>
+                <button
+                  onClick={() => setShowResetConfirm(false)}
+                  disabled={resetLoading}
+                  className="cancel-btn"
+                  style={{ padding: '0.75rem 1.5rem' }}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmResetDatabase}
+                  disabled={resetLoading}
+                  className="reset-btn"
+                  style={{ padding: '0.75rem 1.5rem', backgroundColor: '#f44336' }}
+                >
+                  {resetLoading ? 'Resetting...' : 'Yes, Reset Database'}
+                </button>
+              </div>
+            </div>
           </div>
         )}
       </div>
